@@ -32,6 +32,8 @@ export default function IngestionPanel({ projects, selected, onSelect, online }:
   const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [uploadJob, setUploadJob] = useState<string | null>(null);
   const xhr = useRef<XMLHttpRequest | null>(null);
+  // Cancellation can make the upload request fail before the cancel API responds.
+  const cancellingJobs = useRef(new Set<string>());
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const [dragging, setDragging] = useState(false);
@@ -69,16 +71,39 @@ export default function IngestionPanel({ projects, selected, onSelect, online }:
       request.open('PUT', `/api/jobs/${job.id}/upload`);
       request.setRequestHeader('Content-Type', 'application/octet-stream');
       request.upload.onprogress = event => { if (event.lengthComputable) setUploadPercent(Math.min(100, event.loaded * 100 / event.total)); };
-      request.onload = () => { if (request.status >= 400) { let detail = 'Upload failed. Check the job status.'; try { const response = JSON.parse(request.responseText); if (typeof response.detail === 'string') detail = response.detail; } catch { /* default */ } setError(detail); } xhr.current = null; setUploadJob(null); setUploadPercent(null); void refresh(); };
-      request.onerror = () => { setError('Upload failed. Check your connection.'); xhr.current = null; setUploadJob(null); setUploadPercent(null); void refresh(); };
-      request.onabort = () => { xhr.current = null; setUploadJob(null); setUploadPercent(null); void refresh(); };
+      const finishUpload = () => {
+        cancellingJobs.current.delete(job.id);
+        xhr.current = null; setUploadJob(null); setUploadPercent(null); void refresh();
+      };
+      request.onload = () => {
+        if (request.status >= 400 && !cancellingJobs.current.has(job.id)) {
+          let detail = 'Upload failed. Check the job status.';
+          try { const response = JSON.parse(request.responseText); if (typeof response.detail === 'string') detail = response.detail; } catch { /* default */ }
+          setError(detail);
+        }
+        finishUpload();
+      };
+      request.onerror = () => {
+        if (!cancellingJobs.current.has(job.id)) setError('Upload failed. Check your connection.');
+        finishUpload();
+      };
+      request.onabort = finishUpload;
       request.send(file);
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not start upload.'); }
   }
   async function cancel(job: Job) {
     setError('');
-    try { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); if (uploadJob === job.id) xhr.current?.abort(); await refresh(); }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not cancel job.'); }
+    // Mark intent before calling the API: the server can close the upload first.
+    if (uploadJob === job.id) cancellingJobs.current.add(job.id);
+    try {
+      const result = await api<Job>(`/api/jobs/${job.id}/cancel`, { method: 'POST' });
+      if (result.status === 'failed') setError(result.error || 'Upload failed before it could be cancelled.');
+      if (uploadJob === job.id) xhr.current?.abort();
+      await refresh();
+    } catch (e) {
+      cancellingJobs.current.delete(job.id);
+      setError(e instanceof Error ? `Could not cancel job: ${e.message}` : 'Could not cancel job.');
+    }
   }
   async function remove(video: Video) {
     if (!window.confirm(`Delete “${video.title}” and its local video file? This cannot be undone.`)) return;

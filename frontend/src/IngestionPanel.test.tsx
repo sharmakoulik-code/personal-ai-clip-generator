@@ -81,6 +81,60 @@ describe('ingestion panel', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/jobs/up1/cancel', { method: 'POST' });
   });
 
+  it.each(['error', 'http'] as const)('does not report a %s failure when cancellation closes the upload first', async (outcome) => {
+    let request: FakeXHR | undefined;
+    let resolveCancel: ((value: Response) => void) | undefined;
+    class FakeXHR {
+      upload = { onprogress: null };
+      onload: (() => void) | null = null; onerror: (() => void) | null = null; onabort: (() => void) | null = null;
+      status = 0; responseText = ''; body: unknown;
+      constructor() { request = this; }
+      open() {} setRequestHeader() {} send(body: unknown) { this.body = body; }
+      abort() { this.onabort?.(); }
+    }
+    let started = false;
+    const job = { id: 'race', project_id: 1, source: 'test.mp4', kind: 'upload', status: 'uploading', progress: 10, speed: null, error: null };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === '/api/videos/upload' && init?.method === 'POST') { started = true; return response(job, 201); }
+      if (path === '/api/jobs/race/cancel') return new Promise<Response>(resolve => { resolveCancel = resolve; });
+      return response(path === '/api/jobs' && started ? [job] : []);
+    });
+    vi.stubGlobal('fetch', fetchMock); vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const user = userEvent.setup();
+    render(<IngestionPanel projects={[project]} selected={1} onSelect={() => {}} online />);
+    await user.upload(screen.getByLabelText('Upload a video'), new File(['video'], 'test.mp4', { type: 'video/mp4' }));
+    await waitFor(() => expect(request?.body).toBeTruthy());
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+    // Backend closes the stream before the cancellation response arrives.
+    act(() => {
+      if (outcome === 'error') request?.onerror?.();
+      else if (request) { request.status = 409; request.responseText = JSON.stringify({ detail: 'Upload cancelled' }); request.onload?.(); }
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    await act(async () => { resolveCancel?.(response({ ...job, status: 'cancelled' })); });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('still reports an unrelated upload network error', async () => {
+    let request: FakeXHR | undefined;
+    class FakeXHR {
+      upload = { onprogress: null }; onload: (() => void) | null = null; onerror: (() => void) | null = null; onabort: (() => void) | null = null;
+      status = 0; responseText = ''; body: unknown;
+      constructor() { request = this; }
+      open() {} setRequestHeader() {} send(body: unknown) { this.body = body; } abort() { this.onabort?.(); }
+    }
+    const job = { id: 'network', project_id: 1, source: 'test.mp4', kind: 'upload', status: 'uploading', progress: null, speed: null, error: null };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input) === '/api/videos/upload' ? response(job, 201) : response([])));
+    vi.stubGlobal('XMLHttpRequest', FakeXHR);
+    const user = userEvent.setup();
+    render(<IngestionPanel projects={[project]} selected={1} onSelect={() => {}} online />);
+    await user.upload(screen.getByLabelText('Upload a video'), new File(['video'], 'test.mp4', { type: 'video/mp4' }));
+    await waitFor(() => expect(request?.body).toBeTruthy());
+    act(() => request?.onerror?.());
+    expect((await screen.findByRole('alert')).textContent).toContain('Upload failed. Check your connection.');
+  });
+
   it('rejects an unsupported local file before uploading', async () => {
     const fetchMock = vi.fn(async () => response([]));
     vi.stubGlobal('fetch', fetchMock);
