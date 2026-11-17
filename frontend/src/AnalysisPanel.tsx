@@ -1,10 +1,11 @@
+import RenderPanel from './RenderPanel';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Job = { id: string; status: string; stage: string; progress: number | null; error: string | null; model: string };
 type Clip = { id: string; start: number; end: number; title: string; hook: string; transcript: string; reason: string; score: number; scores: Record<string, number>; selected: boolean };
 type Segment = { start: number; end: number; text: string };
 type Transcript = { language: string | null; model: string; segments: Segment[] };
-type Props = { videoId: string; hasAudio: boolean };
+type Props = { videoId: string; hasAudio: boolean; projectId?: number };
 const active = (job: Job | null) => !!job && (job.status === 'pending' || job.status === 'running');
 const time = (seconds: number) => {
   const total = Math.max(0, Math.floor(seconds));
@@ -22,7 +23,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-export default function AnalysisPanel({ videoId, hasAudio }: Props) {
+export default function AnalysisPanel({ videoId, hasAudio, projectId }: Props) {
   const [model, setModel] = useState('base');
   const [range, setRange] = useState('30-45');
   const [force, setForce] = useState(false);
@@ -95,5 +96,6 @@ export default function AnalysisPanel({ videoId, hasAudio }: Props) {
     {transcript && <details className="analysis-transcript"><summary>View full transcript · {transcript.language || 'Language unknown'} · {transcript.model}</summary>{transcript.segments.map((seg, index) => <p key={index}><span>{time(seg.start)}–{time(seg.end)}</span> {seg.text}</p>)}</details>}
     {transcript && clips.length === 0 && !active(job) && <p className="analysis-notice">No suitable clips were found for this duration. Try another duration range.</p>}
     {clips.length > 0 && <div className="analysis-results"><div className="analysis-results-heading"><h3>Suggested clips ({clips.length})</h3><label>Sort by <select className="ingest-control" value={sort} onChange={e => setSort(e.target.value as 'score' | 'duration')}><option value="score">AI score</option><option value="duration">Duration</option></select></label></div><p className="analysis-notice">Scores are local heuristics, not predictions of virality. Hooks are transcript excerpts. Cloud-generated titles and explanations, when enabled, can be inaccurate; review them.</p><div className="analysis-actions"><button className="secondary-btn" disabled={busy || active(job)} onClick={() => void selectAll(true)}>Select all</button><button className="secondary-btn" disabled={busy || active(job)} onClick={() => void selectAll(false)}>Deselect all</button></div>{sorted.map((clip, index) => <article className="clip-card" key={clip.id}><div className="clip-top"><label><input aria-label={`Select clip ${index + 1}`} type="checkbox" checked={clip.selected} disabled={busy || active(job)} onChange={e => void select(clip, e.target.checked)} /> <strong>Clip {String(index + 1).padStart(2, '0')} · {clip.title}</strong></label><span className="clip-score">{clip.score}/100</span></div><p>{time(clip.start)} – {time(clip.end)} · {Math.round(clip.end - clip.start)} seconds</p>{(clip.reason.startsWith('Groq suggestion (review):') || clip.reason.startsWith('Google Gemini suggestion (review):')) && <p>Title suggested by {clip.reason.startsWith('Groq') ? 'Groq' : 'Google Gemini'} · review accuracy</p>}<p><strong>Hook:</strong> {clip.hook}</p><p><strong>Why:</strong> {clip.reason}</p><details><summary>View clip transcript and scores</summary><p>{clip.transcript}</p><ul>{Object.entries(clip.scores).map(([key, value]) => <li key={key}>{key.replace(/_/g, ' ')}: {value}/100</li>)}</ul></details></article>)}</div>}
+    {projectId && <RenderPanel videoId={videoId} projectId={projectId} clips={clips} />}
   </div>;
 }

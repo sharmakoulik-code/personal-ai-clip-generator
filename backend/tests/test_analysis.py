@@ -103,6 +103,8 @@ def test_analysis_save_selection_reuse_and_restart(configured, monkeypatch):
     assert wait_job(client, job['id'])['status'] == 'completed'
     all_clips = client.patch('/api/videos/vid/clips/selection', json={'selected': True}).json()
     analysis.stop_worker()
+    from app.services import rendering
+    rendering.stop_worker()
     with TestClient(app) as restarted:
         assert restarted.get('/api/videos/vid/clips').json() == all_clips
         assert restarted.get('/api/videos/vid/transcription').json()['segments'] == fake_segments()

@@ -73,6 +73,8 @@ def test_real_upload_validation_and_restart(setup, sample_video, monkeypatch):
     ingestion.stop_worker()
     from app.services import analysis
     analysis.stop_worker()
+    from app.services import rendering
+    rendering.stop_worker()
     with TestClient(app) as restarted:
         assert restarted.get(f"/api/projects/{project['id']}/videos").json()[0]['id'] == video['id']
         assert restarted.get(f"/api/jobs/{job['id']}").json()['status'] == 'completed'

@@ -46,6 +46,9 @@ def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, 
     job_id = uuid.uuid4().hex
     try:
         with database.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM renders WHERE video_id=? AND status IN ('pending','running')", (video['id'],)).fetchone():
+                raise ValueError('Cancel active renders before re-analyzing this video.')
             db.execute('''INSERT INTO analysis_jobs (id,video_id,project_id,model,min_duration,max_duration,force_transcribe,groq_titles,gemini_titles,cloud_titles,status,stage)
                           VALUES (?,?,?,?,?,?,?,?,?,?,'pending','Queued')''', (job_id, video['id'], video['project_id'], model, minimum, maximum, int(force), int(groq_titles), int(gemini_titles), int(cloud_titles)))
     except sqlite3.IntegrityError as exc:

@@ -104,3 +104,26 @@ def initialize() -> None:
         for name in ('groq_titles', 'gemini_titles', 'cloud_titles'):
             if name not in columns:
                 connection.execute(f'ALTER TABLE analysis_jobs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS renders (
+                id TEXT PRIMARY KEY, batch_id TEXT NOT NULL,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                clip_id TEXT NOT NULL, clip_title TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL,
+                layout TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+                settings_json TEXT NOT NULL, tracking_status TEXT,
+                status TEXT NOT NULL, stage TEXT NOT NULL, progress REAL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT,
+                path TEXT, thumbnail_path TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                completed_at TEXT
+            )
+        """)
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_render_per_clip ON renders(clip_id) WHERE status IN ('pending','running')")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS face_track_cache (
+                key TEXT PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                data_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+        """)
