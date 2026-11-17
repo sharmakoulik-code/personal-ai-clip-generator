@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse
 
 from . import database
 from .routes.projects import router
+from .routes.videos import router as videos_router
+from .services import ingestion
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +16,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.initialize()
-    yield
+    ingestion.start_worker()
+    try:
+        yield
+    finally:
+        ingestion.stop_worker()
 
 
 app = FastAPI(title="Personal Clip Generator API", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+app.include_router(videos_router)
 
 
 @app.exception_handler(sqlite3.Error)

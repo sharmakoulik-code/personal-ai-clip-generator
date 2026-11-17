@@ -23,12 +23,12 @@ describe('dashboard', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText('No projects just yet');
-    expect((screen.getByLabelText('YouTube URL') as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText('YouTube URL') as HTMLInputElement).disabled).toBe(false);
     expect((screen.getByLabelText('Upload a video') as HTMLInputElement).disabled).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Create your first project' }));
     await user.type(screen.getByLabelText('Project name'), 'My video');
     await user.click(screen.getByRole('button', { name: 'Create project' }));
-    expect(await screen.findByText('My video')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /My video.*Open project/ })).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith('/api/projects', expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'My video' }) }));
     await user.click(screen.getByRole('button', { name: 'Delete My video' }));
     await screen.findByText('No projects just yet');
@@ -42,7 +42,7 @@ describe('dashboard', () => {
     render(<App />);
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.getByText('Backend offline')).toBeTruthy();
-    fetchMock.mockImplementation(async (input: RequestInfo | URL) => jsonResponse(String(input) === '/api/projects' ? [] : { status: 'ok' }));
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => jsonResponse(String(input) === '/api/health' ? { status: 'ok' } : []));
     await user.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByText('Local workspace')).toBeTruthy());
   });

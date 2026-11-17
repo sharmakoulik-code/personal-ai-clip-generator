@@ -1,62 +1,58 @@
 # Personal AI Clip Generator
 
-A private-by-design, locally running workspace. **Phase 1** provides a dark React/TypeScript/Tailwind dashboard, a FastAPI backend and SQLite-backed project history. Create and delete named projects; they persist after restart. There are no accounts or payment features.
+A local, single-user workspace. It contains a React/TypeScript/Tailwind dashboard, FastAPI and SQLite project history, and an **in-progress Phase 2 ingestion implementation**. No accounts, payment features, cloud storage or publishing are included. AI, transcription, captions and clip rendering are not implemented.
 
-The YouTube URL and file inputs are **disabled**: importing video is Phase 2. Background jobs, AI, video processing, captions, preview and downloads are not implemented. No FFmpeg or API key is needed yet. Local execution does not change GitHub repository visibility; keep the repository private if its contents should not be public.
+Phase 2 supports streamed local video uploads, YouTube metadata and download jobs through yt-dlp, FFprobe validation, local storage, job polling, cancellation, and project/video deletion. Only import videos you own or have permission to download; do not bypass access controls. The YouTube download and Windows end-to-end paths still require validation on a Windows computer with a permitted YouTube video.
 
-## Windows: download and run
+## Windows requirements
 
-Install [Git for Windows](https://git-scm.com/download/win), Python 3.11+ (with the `py` launcher), and Node.js 22.12+ on the 22.x line, 24.x, or 26+ (includes npm). Open PowerShell:
+- Python 3.11+ with the `py` launcher; Node.js 22.12+ on 22.x, 24.x, or 26+; Git.
+- **FFmpeg and FFprobe** on PATH, required for video validation, thumbnails, and merging separate video/audio streams. One option on Windows is `winget install --id Gyan.FFmpeg -e`. Reopen PowerShell afterward, then verify `ffmpeg -version` and `ffprobe -version`.
+- Network access is needed for YouTube metadata and downloads. YouTube availability and formats can change.
 
-```powershell
-git clone https://github.com/sharmakoulik-code/personal-ai-clip-generator.git
-cd personal-ai-clip-generator
-```
+## Start locally on Windows
 
-Run the startup script from the repository root:
+From the project root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
-It installs dependencies, then opens separate PowerShell windows for the backend and frontend. Once both are ready, visit **http://127.0.0.1:5173**. To stop, press Ctrl+C in each server window (answer `Y` if asked), then close those windows. If either server fails, its window shows the error. The script checks that ports 8000 and 5173 are available before launching.
+The script installs dependencies and opens two windows. Open **http://127.0.0.1:5173**. Press Ctrl+C in each window to stop. The default startup commands bind FastAPI and Vite to 127.0.0.1 only. They have no authentication: do not expose them to a network. The Arena test environment may use different, temporary network bindings.
 
-### Manual startup
-
-Use two PowerShell terminals, each starting in the repository root.
-
-**Terminal 1 — FastAPI**
+Manual startup uses two terminals from the repository root:
 
 ```powershell
+# Terminal 1
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 cd backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-**Terminal 2 — React/Vite**
-
 ```powershell
+# Terminal 2
 cd frontend
 npm ci
 npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-For later starts, the venv creation and dependency installation steps can be skipped unless dependencies change. The frontend proxies `/api` requests to FastAPI on port 8000. Check the backend at http://127.0.0.1:8000/api/health. Both commands bind to `127.0.0.1` only; **there is no authentication**, so do not expose either server to a network.
+## Ingest a video
 
-The backend creates `backend/data/clips.sqlite3` automatically. The file is ignored by Git: back it up to retain your project history. To change its location, set `$env:CLIP_DB_PATH = 'C:\clips\projects.sqlite3'` in the backend terminal before starting it.
+Create a project and select it in the source section. For a local video, choose or drop an MP4, MOV, MKV, WEBM or AVI. The browser shows actual bytes sent; the job then validates the file with FFprobe. For YouTube, paste a supported HTTPS video URL, fetch its metadata, review it and select a quality, then confirm. Download percentages reflect the current stream, not necessarily the entire multi-stream merge. Thumbnail generation may be unavailable if FFmpeg cannot extract a frame. Cancel pending or active jobs using their Cancel button. A cancellation during a network operation may take until the next progress callback or network timeout.
+
+The default upload limit is 10 GiB; set `CLIP_MAX_UPLOAD_BYTES` in the backend terminal to change it. Data is stored in `storage/` (ignored by Git) and SQLite in `backend/data/clips.sqlite3`. Set `CLIP_STORAGE_PATH` and `CLIP_DB_PATH` before starting the backend to change these locations. Back up both database and storage together. Individual videos and entire projects can be deleted from the dashboard; project deletion also deletes associated files. Active jobs must be cancelled first. Jobs and videos persist after restart; transfers interrupted during shutdown are marked failed and must be retried. Keep one backend process running: the local queue is designed for a single worker.
 
 ## Tests
-
-From the repository root on Windows:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 cd backend
 ..\.venv\Scripts\python.exe -m pytest -q
 cd ..\frontend
+npm ci
 npm test
 npm run build
 ```
 
-Backend tests use a temporary SQLite database. Frontend tests use mocked HTTP responses; the Vite development proxy connects the running frontend to the real backend.
+The video tests use real FFmpeg/FFprobe when available; YouTube tests use controlled mocks, not a real YouTube connection. Review dependency advisories before deployment; this app is for local personal use only.

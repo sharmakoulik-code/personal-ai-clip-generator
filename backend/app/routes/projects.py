@@ -25,5 +25,11 @@ def create_project(project: ProjectCreate):
 
 @router.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: int):
-    if not projects.delete_project(project_id):
+    try:
+        deleted = projects.delete_project(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not remove project files; check file permissions and try again.") from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
