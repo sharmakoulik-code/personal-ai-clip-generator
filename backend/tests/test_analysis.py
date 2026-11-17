@@ -265,6 +265,11 @@ def test_groq_enhances_cached_transcript_without_changing_timestamps(configured,
         assert url == 'https://api.groq.com/openai/v1/chat/completions'
         assert kwargs['headers']['Authorization'] == 'Bearer test-only-key'
         assert kwargs['follow_redirects'] is False
+        request = kwargs['json']
+        assert request['model'] == 'openai/gpt-oss-20b'
+        assert request['reasoning_format'] == 'hidden' and request['reasoning_effort'] == 'low'
+        assert request['response_format'] == {'type': 'json_object'}
+        assert request['max_completion_tokens'] >= 4096
         import json
         payload = json.loads(kwargs['json']['messages'][1]['content'])
         calls.append(payload)
@@ -332,3 +337,23 @@ def test_groq_network_errors_do_not_expose_details(monkeypatch):
     with pytest.raises(ValueError) as err:
         groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
     assert 'test-only-key' not in str(err.value) and 'sensitive' not in str(err.value)
+
+
+def test_groq_model_unavailable_error_is_safe(monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(404, text='secret server response'))
+    with pytest.raises(ValueError, match='model or endpoint unavailable') as err:
+        groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
+    assert 'secret' not in str(err.value) and 'test-only-key' not in str(err.value)
+
+
+def test_groq_truncated_output_is_rejected(monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    body = {'choices': [{'finish_reason': 'length', 'message': {'content': '{"clips":[{"id":"real","title":"x","reason":"y"}]}'}}]}
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(200, json=body))
+    with pytest.raises(ValueError, match='invalid response'):
+        groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
