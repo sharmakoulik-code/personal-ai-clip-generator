@@ -4,6 +4,8 @@ import os
 
 import httpx
 
+from .provider_errors import ProviderError
+
 # Stable Gemini Developer API model; access, quotas and pricing depend on account.
 _MODEL = 'gemini-3.5-flash-lite'
 _URL = f'https://generativelanguage.googleapis.com/v1beta/models/{_MODEL}:generateContent'
@@ -30,16 +32,18 @@ def enhance(clips: list[dict], check_cancel=lambda: None) -> list[dict]:
         try:
             response = httpx.post(_URL, headers={'x-goog-api-key': key}, json=body, timeout=45.0, follow_redirects=False)
         except httpx.HTTPError:
-            raise ValueError('Could not reach Google Gemini. Check the network connection and try again.') from None
+            raise ProviderError('network', 'Could not reach Google Gemini. Check the network connection and try again.') from None
         check_cancel()
-        if response.status_code in (400, 401, 403):
-            raise ValueError('Google Gemini rejected the request, API key, or model access. Check your local configuration.')
+        if response.status_code == 400:
+            raise ProviderError('request', 'Google Gemini rejected the request (HTTP 400). Check model settings and app updates.')
+        if response.status_code in (401, 403):
+            raise ProviderError('auth', 'Google Gemini rejected the API key or model access. Check your local configuration.')
         if response.status_code == 404:
-            raise ValueError('Google Gemini model or endpoint unavailable (HTTP 404). Check model access and app updates.')
+            raise ProviderError('unavailable', 'Google Gemini model or endpoint unavailable (HTTP 404). Check model access and app updates.')
         if response.status_code == 429:
-            raise ValueError('Google Gemini rate or quota limit reached. Retry later or choose another provider.')
+            raise ProviderError('quota', 'Google Gemini rate or quota limit reached. Retry later or choose another provider.')
         if response.status_code != 200:
-            raise ValueError(f'Google Gemini request failed (HTTP {response.status_code}). Try again or choose another provider.')
+            raise ProviderError('http', f'Google Gemini request failed (HTTP {response.status_code}). Try again or choose another provider.')
         try:
             candidate = response.json()['candidates'][0]
             if candidate['finishReason'] != 'STOP': raise ValueError()
@@ -58,5 +62,5 @@ def enhance(clips: list[dict], check_cancel=lambda: None) -> list[dict]:
                 c['title'] = title
                 c['reason'] = 'Google Gemini suggestion (review): ' + reason + ' Local heuristic: ' + c['reason']
         except (ValueError, KeyError, TypeError, IndexError):
-            raise ValueError('Google Gemini returned an invalid or blocked response. No new results were saved; try again or choose another provider.') from None
+            raise ProviderError('invalid_response', 'Google Gemini returned an invalid or blocked response. No new results were saved; try again or choose another provider.') from None
     return result

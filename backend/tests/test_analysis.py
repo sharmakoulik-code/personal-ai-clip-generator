@@ -503,3 +503,61 @@ def test_cloud_ai_does_not_fallback_after_cancellation(configured, monkeypatch):
     release.set()
     assert wait_job(client, job['id'])['status'] == 'cancelled'
     assert calls == ['groq']
+
+
+def test_cloud_reports_safe_provider_categories_and_preserves_results(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement, gemini_enhancement
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    first = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    old = client.patch('/api/videos/vid/clips/selection', json={'selected': True}).json()
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-groq-key')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-gemini-key')
+    def fake_post(url, **kwargs):
+        return httpx.Response(429 if 'groq' in url else 403, text='private provider response')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fake_post)
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'cloud_titles': True}).json()
+    failed = wait_job(client, job['id'])
+    assert failed['status'] == 'failed'
+    assert 'Groq: rate or quota limit (HTTP 429)' in failed['error']
+    assert 'Google Gemini: key rejected or model access denied' in failed['error']
+    assert 'secret' not in str(failed) and 'private provider response' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json() == old
+
+
+@pytest.mark.parametrize('provider,status,category', [
+    ('groq', 401, 'auth'), ('groq', 404, 'unavailable'), ('groq', 429, 'quota'), ('groq', 500, 'http'),
+    ('gemini', 400, 'request'), ('gemini', 403, 'auth'), ('gemini', 404, 'unavailable'), ('gemini', 429, 'quota'), ('gemini', 500, 'http'),
+])
+def test_provider_error_categories_are_sanitized(provider, status, category, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement, gemini_enhancement
+    from app.services.provider_errors import ProviderError
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-key')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **k: httpx.Response(status, text='private response'))
+    service = groq_enhancement if provider == 'groq' else gemini_enhancement
+    with pytest.raises(ProviderError) as err:
+        service.enhance([{'id':'one', 'transcript':'text'}])
+    assert err.value.category == category
+    assert 'secret-key' not in str(err.value) and 'private response' not in str(err.value)
+
+
+def test_cloud_network_and_invalid_response_categories(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-groq')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-gemini')
+    def fake_post(url, **kwargs):
+        if 'groq' in url: raise httpx.ConnectError('secret network details')
+        return httpx.Response(200, json={'candidates': [{'finishReason':'SAFETY'}]})
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fake_post)
+    job = client.post('/api/videos/vid/analyze', json={'duration_range':'15-30', 'cloud_titles':True}).json()
+    failed = wait_job(client, job['id'])
+    assert 'Groq: connection or timeout error' in failed['error']
+    assert 'Google Gemini: invalid, truncated or blocked response' in failed['error']
+    assert 'secret' not in str(failed)

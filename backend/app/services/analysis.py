@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .. import database
 from . import clip_selection, gemini_enhancement, groq_enhancement, ingestion, media
+from .provider_errors import ProviderError, SAFE_DIAGNOSES
 
 logger = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -233,14 +234,18 @@ def cloud_enhance(job_id: str, clips: list[dict]) -> tuple[list[dict], str]:
         update(job_id, stage=f'Cloud AI: trying {name}')
         try:
             return service.enhance(clips, lambda: check_cancel(job_id)), name
+        except ProviderError as exc:
+            # Only fixed categories are exposed: never raw responses, keys or exception text.
+            failures.append((name, SAFE_DIAGNOSES.get(exc.category, 'provider error')))
+            check_cancel(job_id)
         except ValueError:
-            # Provider helpers expose sanitized errors, but don't pass through
-            # arbitrary details, responses or keys when both providers fail.
-            failures.append(name)
+            failures.append((name, 'provider error'))
             check_cancel(job_id)
     if not failures:
         raise ValueError('Cloud AI needs GROQ_API_KEY or GEMINI_API_KEY in the backend environment.')
-    raise ValueError('Cloud AI failed with ' + ' and '.join(failures) + '. Check provider keys, model access, quota and connection; previous results were kept.')
+    names = ' and '.join(name for name, _ in failures)
+    reasons = '; '.join(f'{name}: {reason}' for name, reason in failures)
+    raise ValueError(f'Cloud AI failed with {names}. {reasons}. Previous results were kept.')
 
 
 def run_job(job: dict) -> None:

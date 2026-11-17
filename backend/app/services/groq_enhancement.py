@@ -8,6 +8,8 @@ import os
 
 import httpx
 
+from .provider_errors import ProviderError
+
 _URL = 'https://api.groq.com/openai/v1/chat/completions'
 # Groq retired llama-3.1-8b-instant for free/developer plans in 2026.
 _MODEL = 'openai/gpt-oss-20b'
@@ -37,16 +39,16 @@ def enhance(clips: list[dict], check_cancel=lambda: None) -> list[dict]:
         try:
             response = httpx.post(_URL, headers={'Authorization': 'Bearer ' + key}, json=request, timeout=45.0, follow_redirects=False)
         except httpx.HTTPError:
-            raise ValueError('Could not reach Groq. Check the network connection and try again.') from None
+            raise ProviderError('network', 'Could not reach Groq. Check the network connection and try again.') from None
         check_cancel()
         if response.status_code in (401, 403):
-            raise ValueError('Groq rejected the API key or model access. Check your local configuration.')
+            raise ProviderError('auth', 'Groq rejected the API key or model access. Check your local configuration.')
         if response.status_code == 404:
-            raise ValueError('Groq model or endpoint unavailable (HTTP 404). Check model access and app updates.')
+            raise ProviderError('unavailable', 'Groq model or endpoint unavailable (HTTP 404). Check model access and app updates.')
         if response.status_code == 429:
-            raise ValueError('Groq rate or quota limit reached. Retry later or run without Groq.')
+            raise ProviderError('quota', 'Groq rate or quota limit reached. Retry later or run without Groq.')
         if response.status_code != 200:
-            raise ValueError(f'Groq request failed (HTTP {response.status_code}). Try again or run without Groq.')
+            raise ProviderError('http', f'Groq request failed (HTTP {response.status_code}). Try again or run without Groq.')
         try:
             choice = response.json()['choices'][0]
             if choice.get('finish_reason') == 'length': raise ValueError()
@@ -65,5 +67,5 @@ def enhance(clips: list[dict], check_cancel=lambda: None) -> list[dict]:
                 c['title'] = title
                 c['reason'] = 'Groq suggestion (review): ' + reason + ' Local heuristic: ' + c['reason']
         except (ValueError, KeyError, TypeError, IndexError, json.JSONDecodeError):
-            raise ValueError('Groq returned an invalid response. No new results were saved; try again or run without Groq.') from None
+            raise ProviderError('invalid_response', 'Groq returned an invalid response. No new results were saved; try again or run without Groq.') from None
     return result
