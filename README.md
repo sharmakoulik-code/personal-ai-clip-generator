@@ -98,7 +98,7 @@ Choose **Google Gemini** in the title and explanation provider menu to send cand
 To configure on Windows without showing the key, stop the backend but keep its PowerShell window open, then run:
 
 ```powershell
-$null = Read-Host 'Copy your Gemini key, then press Enter without pasting'; $env:GEMINI_API_KEY = (Get-Clipboard -Raw).Trim(); Set-Clipboard -Value ''
+$null = Read-Host 'Copy your Gemini key, then press Enter without pasting'; $env:GEMINI_API_KEY = (Get-Clipboard -Raw).Trim(); Set-Clipboard -Value ' '
 ```
 
-When the prompt appears, copy the Gemini key from your local source, return to PowerShell and press Enter without pasting. This reads and clears the current clipboard; clipboard history may still retain it if enabled. Launch the backend from the same window so it inherits the environment variable. Never paste a key into chat, commands, or Git. The app does not save the key; closing that PowerShell window removes it from that process. Failed or blocked responses leave earlier results and selections intact; successful reruns replace them. Google integration has automated mock coverage but requires a real API-key test.
+When the prompt appears, copy the Gemini key from your local source, return to PowerShell and press Enter without pasting. This reads the key and overwrites the current clipboard with a space; clipboard history may still retain it if enabled. Launch the backend from the same window so it inherits the environment variable. Never paste a key into chat, commands, or Git. The app does not save the key; closing that PowerShell window removes it from that process. Failed or blocked responses leave earlier results and selections intact; successful reruns replace them. Google integration has automated mock coverage but requires a real API-key test.
