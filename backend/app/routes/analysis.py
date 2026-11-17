@@ -13,6 +13,7 @@ class AnalysisRequest(BaseModel):
     duration_range: str = '30-45'
     force_transcribe: bool = False
     groq_titles: bool = False
+    gemini_titles: bool = False
 
     @field_validator('model')
     @classmethod
@@ -43,6 +44,8 @@ def safe_job(job: dict) -> dict:
 
 @router.post('/videos/{video_id}/analyze', status_code=202)
 def analyze(video_id: str, body: AnalysisRequest):
+    if body.groq_titles and body.gemini_titles:
+        raise HTTPException(422, 'Choose only one title provider.')
     video = video_or_404(video_id)
     if not video['has_audio']:
         raise HTTPException(422, 'This video has no audio stream to transcribe.')
@@ -50,7 +53,7 @@ def analyze(video_id: str, body: AnalysisRequest):
         raise HTTPException(422, 'Video duration is unavailable.')
     minimum, maximum = (int(x) for x in body.duration_range.split('-'))
     try:
-        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe, body.groq_titles))
+        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe, body.groq_titles, body.gemini_titles))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

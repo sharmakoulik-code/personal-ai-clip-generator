@@ -13,7 +13,7 @@ Install the dependencies in `requirements.txt` first. FFmpeg and FFprobe must be
 
 Install the existing `requirements.txt` (Python 3.11+); it includes `faster-whisper==1.2.1`. FFmpeg and FFprobe are required as for ingestion. Default inference is CPU/int8, with optional `CLIP_WHISPER_DEVICE=cpu|cuda|auto`. Models are downloaded to `<CLIP_STORAGE_PATH>/models` or loaded from `models/whisper-{tiny,base,small,medium}`. CUDA requires a separately compatible NVIDIA runtime. See the root README for Windows use, downloading models, limitations and validation status.
 
-- `POST /api/videos/{video_id}/analyze`: body `{ "model": "base", "duration_range": "15-30", "force_transcribe": false, "groq_titles": false }` (other ranges: `30-45`, `45-60`, `60-90`). Returns 202; at most one queued/running analysis per video.
+- `POST /api/videos/{video_id}/analyze`: body `{ "model": "base", "duration_range": "15-30", "force_transcribe": false, "groq_titles": false, "gemini_titles": false }` (other ranges: `30-45`, `45-60`, `60-90`). Returns 202; at most one queued/running analysis per video.
 - `GET /api/videos/{video_id}/analysis-jobs`, `GET /api/analysis/jobs/{id}`, `POST /api/analysis/jobs/{id}/cancel`: persistent job progress/state and cancellation.
 - `GET /api/videos/{video_id}/transcription`: stored language, model, timed segments and word timestamps; 404 until available.
 - `GET /api/videos/{video_id}/clips`: candidates with timestamps, title, hook, transcript, weighted scores and selection. `PATCH /api/clips/{id}` with `{ "selected": true }` updates one; `PATCH /api/videos/{video_id}/clips/selection` updates all.
@@ -24,3 +24,6 @@ For optional real inference testing, set `CLIP_TEST_MODEL_DIR` to a converted Ba
 
 
 Optional `groq_titles: true` uses `GROQ_API_KEY` from the backend process environment to send selected candidate transcript excerpts to Groq for suggested titles and explanations. The local transcript, timestamps, hooks and heuristic scores remain unchanged. This is opt-in and does not provide cloud transcription. A Groq failure preserves prior results. The `analysis_jobs.groq_titles` column is added automatically on initialization for existing databases. See the root README for key setup and privacy.
+
+
+With `gemini_titles: true`, candidate transcript excerpts are sent to Google's Gemini Developer API using the backend-only `GEMINI_API_KEY`. Only one provider can be chosen per job; both flags true is rejected. The database adds `analysis_jobs.gemini_titles` to existing installations on startup. See the root README for setup, privacy and limitations.

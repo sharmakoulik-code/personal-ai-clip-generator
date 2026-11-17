@@ -324,8 +324,8 @@ def test_groq_column_migrates_existing_database(tmp_path, monkeypatch):
     database.initialize()
     database.initialize()  # migration is idempotent
     with database.connect() as db:
-        row = db.execute("SELECT id, groq_titles FROM analysis_jobs WHERE id='old'").fetchone()
-        assert row['groq_titles'] == 0
+        row = db.execute("SELECT id, groq_titles, gemini_titles FROM analysis_jobs WHERE id='old'").fetchone()
+        assert row['groq_titles'] == 0 and row['gemini_titles'] == 0
 
 
 def test_groq_network_errors_do_not_expose_details(monkeypatch):
@@ -357,3 +357,68 @@ def test_groq_truncated_output_is_rejected(monkeypatch):
     monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(200, json=body))
     with pytest.raises(ValueError, match='invalid response'):
         groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
+
+
+def test_gemini_enhances_cached_transcript(configured, monkeypatch):
+    import httpx
+    import json
+    from app.services import gemini_enhancement
+    client, _ = configured
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-google-key')
+    monkeypatch.setattr(analysis, 'transcribe', lambda video, job: ('en', fake_segments()))
+    first = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    old = client.get('/api/videos/vid/clips').json()
+    calls = []
+    def fake_post(url, **kwargs):
+        assert url == 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent'
+        assert kwargs['headers']['x-goog-api-key'] == 'fake-google-key'
+        assert 'fake-google-key' not in url
+        assert kwargs['follow_redirects'] is False
+        assert kwargs['json']['generationConfig']['responseMimeType'] == 'application/json'
+        payload = json.loads(kwargs['json']['contents'][0]['parts'][0]['text'])
+        calls.append(payload)
+        result = {'clips': [{'id': c['id'], 'title': 'A useful lesson', 'reason': 'A useful insight.'} for c in payload]}
+        return httpx.Response(200, json={'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': json.dumps(result)}]}}]})
+    monkeypatch.setattr(gemini_enhancement.httpx, 'post', fake_post)
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: pytest.fail('Expected cached transcript'))
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'gemini_titles': True}).json()
+    assert wait_job(client, job['id'])['status'] == 'completed'
+    updated = client.get('/api/videos/vid/clips').json()
+    assert calls and all(c['title'] == 'A useful lesson' and c['reason'].startswith('Google Gemini suggestion (review):') for c in updated)
+    assert [(c['start'], c['end'], c['score'], c['hook']) for c in updated] == [(c['start'], c['end'], c['score'], c['hook']) for c in old]
+    assert 'fake-google-key' not in str(client.get('/api/videos/vid/analysis-jobs').json())
+
+
+def test_gemini_key_validation_provider_choice_and_failure(configured, monkeypatch):
+    import httpx
+    from app.services import gemini_enhancement
+    client, _ = configured
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    assert client.post('/api/videos/vid/analyze', json={'gemini_titles': True}).status_code == 409
+    assert client.post('/api/videos/vid/analyze', json={'gemini_titles': True, 'groq_titles': True}).status_code == 422
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, job['id'])['status'] == 'completed'
+    old = client.get('/api/videos/vid/clips').json()
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-google-key')
+    monkeypatch.setattr(gemini_enhancement.httpx, 'post', lambda *a, **k: httpx.Response(429, text='do not expose'))
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'gemini_titles': True}).json()
+    failed = wait_job(client, job['id'])
+    assert failed['status'] == 'failed' and 'quota' in failed['error']
+    assert 'fake-google-key' not in str(failed) and 'do not expose' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json() == old
+
+
+@pytest.mark.parametrize('body', [
+    {'candidates': [{'finishReason': 'SAFETY'}]},
+    {'candidates': [{'finishReason': 'MAX_TOKENS', 'content': {'parts': [{'text': '{}'}]}}]},
+    {'candidates': [{'finishReason': 'STOP', 'content': {'parts': [{'text': '{"clips":[{"id":"wrong","title":"x","reason":"y"}]}'}]}}]},
+])
+def test_gemini_rejects_blocked_or_fabricated_responses(monkeypatch, body):
+    import httpx
+    from app.services import gemini_enhancement
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-google-key')
+    monkeypatch.setattr(gemini_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(200, json=body))
+    with pytest.raises(ValueError, match='invalid or blocked'):
+        gemini_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
