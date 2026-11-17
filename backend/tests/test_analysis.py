@@ -324,8 +324,8 @@ def test_groq_column_migrates_existing_database(tmp_path, monkeypatch):
     database.initialize()
     database.initialize()  # migration is idempotent
     with database.connect() as db:
-        row = db.execute("SELECT id, groq_titles, gemini_titles FROM analysis_jobs WHERE id='old'").fetchone()
-        assert row['groq_titles'] == 0 and row['gemini_titles'] == 0
+        row = db.execute("SELECT id, groq_titles, gemini_titles, cloud_titles FROM analysis_jobs WHERE id='old'").fetchone()
+        assert row['groq_titles'] == 0 and row['gemini_titles'] == 0 and row['cloud_titles'] == 0
 
 
 def test_groq_network_errors_do_not_expose_details(monkeypatch):
@@ -422,3 +422,82 @@ def test_gemini_rejects_blocked_or_fabricated_responses(monkeypatch, body):
     monkeypatch.setattr(gemini_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(200, json=body))
     with pytest.raises(ValueError, match='invalid or blocked'):
         gemini_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
+
+
+def test_cloud_ai_groq_first_and_gemini_fallback(configured, monkeypatch):
+    from app.services import gemini_enhancement, groq_enhancement
+    client, _ = configured
+    monkeypatch.setenv('GROQ_API_KEY', 'fake-groq')
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-gemini')
+    monkeypatch.setattr(analysis, 'transcribe', lambda *args: ('en', fake_segments()))
+    calls = []
+    def groq_success(clips, check):
+        calls.append('groq'); check()
+        return [dict(c, title='Groq title', reason='Groq suggestion (review): test') for c in clips]
+    def gemini_success(clips, check):
+        calls.append('gemini'); check()
+        return [dict(c, title='Gemini title', reason='Google Gemini suggestion (review): test') for c in clips]
+    monkeypatch.setattr(groq_enhancement, 'enhance', groq_success)
+    monkeypatch.setattr(gemini_enhancement, 'enhance', gemini_success)
+    request = {'cloud_titles': True, 'duration_range': '15-30'}
+    first = client.post('/api/videos/vid/analyze', json=request).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    assert calls == ['groq']
+    assert all(c['title'] == 'Groq title' for c in client.get('/api/videos/vid/clips').json())
+    def groq_failure(clips, check):
+        calls.append('groq'); raise ValueError('Temporary failure')
+    monkeypatch.setattr(groq_enhancement, 'enhance', groq_failure)
+    second = client.post('/api/videos/vid/analyze', json=request).json()
+    assert wait_job(client, second['id'])['status'] == 'completed'
+    assert calls == ['groq', 'groq', 'gemini']
+    assert all(c['title'] == 'Gemini title' for c in client.get('/api/videos/vid/clips').json())
+    monkeypatch.delenv('GROQ_API_KEY')
+    third = client.post('/api/videos/vid/analyze', json=request).json()
+    assert wait_job(client, third['id'])['status'] == 'completed'
+    assert calls[-1] == 'gemini'
+
+
+def test_cloud_ai_missing_keys_or_both_failed_preserves_results(configured, monkeypatch):
+    from app.services import gemini_enhancement, groq_enhancement
+    client, _ = configured
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    assert client.post('/api/videos/vid/analyze', json={'cloud_titles': True}).status_code == 409
+    assert client.post('/api/videos/vid/analyze', json={'cloud_titles': True, 'groq_titles': True}).status_code == 422
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    first = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    old = client.patch('/api/videos/vid/clips/selection', json={'selected': True}).json()
+    monkeypatch.setenv('GROQ_API_KEY', 'fake-groq')
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-gemini')
+    def fails(*args): raise ValueError('SECRET provider detail')
+    monkeypatch.setattr(groq_enhancement, 'enhance', fails)
+    monkeypatch.setattr(gemini_enhancement, 'enhance', fails)
+    second = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'cloud_titles': True}).json()
+    result = wait_job(client, second['id'])
+    assert result['status'] == 'failed' and 'Groq and Google Gemini' in result['error']
+    assert 'SECRET' not in result['error']
+    assert client.get('/api/videos/vid/clips').json() == old
+
+
+def test_cloud_ai_does_not_fallback_after_cancellation(configured, monkeypatch):
+    from app.services import gemini_enhancement, groq_enhancement
+    client, _ = configured
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    monkeypatch.setenv('GROQ_API_KEY', 'fake-groq')
+    monkeypatch.setenv('GEMINI_API_KEY', 'fake-gemini')
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    def groq_blocked(clips, check):
+        calls.append('groq'); entered.set(); release.wait(3); check()
+        raise ValueError('should not reach')
+    def gemini_called(*args):
+        calls.append('gemini'); raise AssertionError('No fallback after cancellation')
+    monkeypatch.setattr(groq_enhancement, 'enhance', groq_blocked)
+    monkeypatch.setattr(gemini_enhancement, 'enhance', gemini_called)
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'cloud_titles': True}).json()
+    assert entered.wait(3)
+    client.post(f"/api/analysis/jobs/{job['id']}/cancel")
+    release.set()
+    assert wait_job(client, job['id'])['status'] == 'cancelled'
+    assert calls == ['groq']

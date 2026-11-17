@@ -26,7 +26,7 @@ describe('AI analysis', () => {
     await user.click(screen.getByRole('button', { name: 'Analyze Video with AI' }));
     expect(await screen.findByText('Transcribing video')).toBeTruthy();
     expect(screen.getByText('37% of source audio')).toBeTruthy();
-    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'tiny', duration_range: '15-30', force_transcribe: false, groq_titles: false, gemini_titles: false }) }));
+    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'tiny', duration_range: '15-30', force_transcribe: false, cloud_titles: false }) }));
     expect((screen.getByRole('button', { name: 'Analyze Video with AI' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -60,7 +60,7 @@ describe('AI analysis', () => {
     expect(mock).toHaveBeenCalledWith('/api/videos/v1/clips/selection', expect.objectContaining({ method: 'PATCH' }));
   });
 
-  it('sends the Groq opt-in explicitly when selected', async () => {
+  it('opts in to Cloud AI and discloses fallback and privacy', async () => {
     const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       if (path.endsWith('/analyze') && init?.method === 'POST') return response({ id: 'j1' }, 202);
@@ -70,25 +70,11 @@ describe('AI analysis', () => {
     vi.stubGlobal('fetch', mock);
     const user = userEvent.setup();
     render(<AnalysisPanel videoId="v1" hasAudio />);
-    await user.selectOptions(screen.getByLabelText('Title and explanation provider'), 'groq');
+    await user.selectOptions(screen.getByLabelText('Title and explanation provider'), 'cloud');
+    expect(screen.getByText(/tries Groq first, then Google Gemini/)).toBeTruthy();
+    expect(screen.getByText(/may be sent to both/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Analyze Video with AI' }));
-    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'base', duration_range: '30-45', force_transcribe: false, groq_titles: true, gemini_titles: false }) }));
-  });
-
-  it('opts in to Google Gemini and shows the privacy notice', async () => {
-    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
-      if (path.endsWith('/analyze') && init?.method === 'POST') return response({ id: 'j1' }, 202);
-      if (path.endsWith('/transcription')) return response({}, 404);
-      return response([]);
-    });
-    vi.stubGlobal('fetch', mock);
-    const user = userEvent.setup();
-    render(<AnalysisPanel videoId="v1" hasAudio />);
-    await user.selectOptions(screen.getByLabelText('Title and explanation provider'), 'gemini');
-    expect(screen.getByText(/Candidate transcript excerpts will be sent to Google Gemini/)).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Analyze Video with AI' }));
-    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'base', duration_range: '30-45', force_transcribe: false, groq_titles: false, gemini_titles: true }) }));
+    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'base', duration_range: '30-45', force_transcribe: false, cloud_titles: true }) }));
   });
 
   it('cancels a running analysis', async () => {

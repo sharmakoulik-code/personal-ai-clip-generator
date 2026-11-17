@@ -65,7 +65,7 @@ Whisper Base is the default; Tiny is faster, while Small and Medium need more me
 
 The default device is CPU (int8). To try CUDA on a compatible NVIDIA system, set `$env:CLIP_WHISPER_DEVICE = 'cuda'` in the PowerShell window **before** launching the startup script; CUDA and CTranslate2's required GPU libraries must already be installed. `'auto'` attempts GPU detection and otherwise uses CPU; `'cpu'` forces CPU. GPU operation is not yet validated on Windows.
 
-The score is a **local heuristic**, not a virality prediction or semantic LLM assessment. It combines lexical signals, punctuation, sentence/clause boundaries, and standalone-context indicators. Keyword signals are primarily English; multilingual speech is supported by Whisper, but ranking in other languages is limited. By default, titles and hooks are literal transcript excerpts; optional Groq titles are generated and must be checked. Whisper can mistranscribe or hallucinate; zero-duration word timestamps are excluded, and clips may be unavailable if no spoken span fits the chosen range. Review the transcript, boundaries, and score before using any suggestion. Audio decoding is chunked, but transcript data grows with video length; ranking keeps a bounded pool of 3,000 windows and shows at most 30 suggestions. This cap can omit useful moments from very long videos. The optional Groq and Google Gemini features described below use an LLM for titles and explanations only; no scene detection, clip rendering or captions are implemented.
+The score is a **local heuristic**, not a virality prediction or semantic LLM assessment. It combines lexical signals, punctuation, sentence/clause boundaries, and standalone-context indicators. Keyword signals are primarily English; multilingual speech is supported by Whisper, but ranking in other languages is limited. By default, titles and hooks are literal transcript excerpts; optional Cloud AI titles are generated and must be checked. Whisper can mistranscribe or hallucinate; zero-duration word timestamps are excluded, and clips may be unavailable if no spoken span fits the chosen range. Review the transcript, boundaries, and score before using any suggestion. Audio decoding is chunked, but transcript data grows with video length; ranking keeps a bounded pool of 3,000 windows and shows at most 30 suggestions. This cap can omit useful moments from very long videos. The optional Groq and Google Gemini features described below use an LLM for titles and explanations only; no scene detection, clip rendering or captions are implemented.
 
 Existing transcripts are reused when the same model is selected. To obtain a fresh transcription, check **Re-transcribe even if cached**. Re-running analysis keeps old results until the new run succeeds, then replaces the previous clips and their selections. Individual selections and transcripts persist across restarts. Deleting a video or project removes its associated transcript, analysis jobs and clips; active analysis must be cancelled first. Interrupted running analyses are marked failed after a restart; pending analyses remain queued. Run only one backend process at a time.
 
@@ -74,31 +74,26 @@ Existing transcripts are reused when the same model is selected. To obtain a fre
 Backend tests cover local job states, clip scoring, selection persistence, no-audio handling and chunk boundaries. The optional real-Whisper integration test needs FFmpeg/FFprobe plus `CLIP_TEST_MODEL_DIR` pointing to a local converted Base model and `CLIP_TEST_SPEECH_VIDEO` pointing to a short MP4 containing the public JFK speech fixture; without both it is skipped. For example in PowerShell, set those environment variables before running `pytest`. Frontend tests mock API responses and cover starting analysis, progress, sorting, transcript viewing and selections.
 
 
-### Optional Groq titles and explanations
+### Optional Cloud AI titles and explanations
 
-This is **off by default**. When explicitly checked, the backend sends the transcript text of up to 30 locally selected candidate clips (in batches of five, up to 6,000 characters per clip) and generated candidate IDs to Groq's chat API, using `openai/gpt-oss-20b`. It does not send the video file. Groq receives transcript text, which may contain private information. Groq's account terms, retention policies, limits and any charges apply; a free tier is not guaranteed. Review generated titles and explanations for accuracy. Clip timestamps, hooks and scores remain local, and Groq does not choose additional candidates or speed up transcription. Local audio transcription still runs unless a transcript for the same model is cached.
+Choose **Cloud AI** in the title and explanation provider menu. It uses Groq first; if Groq is not configured, is rate-limited, or its request fails, the app tries Google Gemini if configured. Only one provider's result is used; both keys are needed for fallback. The displayed clip identifies the provider. If neither provider succeeds, the job fails and prior results and selections remain unchanged. There is no silent fallback to local results.
 
-Set `GROQ_API_KEY` in the environment of the backend process; it is never sent to the frontend, written to the database or committed. Do **not** paste the key into chat or source code. On Windows, stop both servers and run these commands from the repository root, entering the key only into the masked local prompt:
+Both providers may receive the transcript text of up to 30 locally selected candidate clips in batches of five, up to 6,000 characters per clip; the video file is not uploaded. If Groq fails after processing some batches, the full set can be sent to Google Gemini. Groq uses `openai/gpt-oss-20b`; Google Gemini uses `gemini-3.5-flash-lite`. Provider terms, model availability, rate limits and charges depend on your account. Google may use free-tier content to improve its products; review [Google's terms and pricing](https://ai.google.dev/gemini-api/docs/pricing) before sending private text. Groq's terms and privacy policy also apply.
+
+Cloud AI suggests titles and explanations, but it does not select new clips or change the local timestamps, transcript-based hooks or heuristic scores. It does not speed up transcription. Generated titles can be inaccurate; review them. A rerun using the same Whisper model reuses its cached transcript, unless re-transcription is requested. A successful rerun replaces previous clips and selections. Cancellation can wait for an in-flight network request (45-second network inactivity timeouts). Groq was exercised on Windows by the user; Gemini and the fallback sequence have only mocked automated tests so far.
+
+Set `GROQ_API_KEY` and `GEMINI_API_KEY` in the backend process environment, not in source code or chat. Configure both for fallback; with only one key, Cloud AI uses only that provider. On Windows, stop both servers and run these lines **one at a time** in the same PowerShell window from the repository root. At each prompt, copy the corresponding key from your local source and press Enter without pasting it into PowerShell:
 
 ```powershell
-$secure = Read-Host 'Groq API key' -AsSecureString
-$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-try { $env:GROQ_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr); $secure.Dispose() }
-powershell -ExecutionPolicy Bypass -File .\start-local.ps1
-Remove-Item Env:GROQ_API_KEY
+$null = Read-Host 'Copy your Groq key, then press Enter without pasting'; $env:GROQ_API_KEY = (Get-Clipboard -Raw).Trim(); Set-Clipboard -Value ' '
 ```
-
-The child backend inherits the key until that backend window is closed; the last command removes it from the launcher window. Choose the same Whisper model as your existing transcript, leave re-transcribe unchecked, choose **Groq** in the title and explanation provider menu, and rerun. Successful reruns replace clips and selections. If Groq fails or returns invalid data, the job fails without replacing your previous results. No automatic provider fallback occurs; you can retry with Groq off. Cancellation can wait for an in-flight network request (45-second network inactivity timeouts). A missing key, model access issue, or rate/quota limit is reported without displaying the key or provider response body. Groq integration is covered by mocked tests only; actual Groq service and Windows use are not yet verified.
-
-
-### Optional Google Gemini titles and explanations
-
-Choose **Google Gemini** in the title and explanation provider menu to send candidate transcript excerpts (not the video) to the Gemini Developer API. This requires a Google AI Studio Gemini API key in the backend's `GEMINI_API_KEY` environment variable, and uses the stable `gemini-3.5-flash-lite` model. It is a separate provider from Groq; only the explicitly selected provider receives excerpts, and there is no automatic fallback. This feature does not speed up transcription or change local scores, hooks, timestamps, or candidate selection. Google may use content to improve its products on the free tier; see [Google's pricing and terms](https://ai.google.dev/gemini-api/docs/pricing) before sending private content. Quotas, model availability, regional access and charges depend on your account.
-
-To configure on Windows without showing the key, stop the backend but keep its PowerShell window open, then run:
 
 ```powershell
 $null = Read-Host 'Copy your Gemini key, then press Enter without pasting'; $env:GEMINI_API_KEY = (Get-Clipboard -Raw).Trim(); Set-Clipboard -Value ' '
 ```
 
-When the prompt appears, copy the Gemini key from your local source, return to PowerShell and press Enter without pasting. This reads the key and overwrites the current clipboard with a space; clipboard history may still retain it if enabled. Launch the backend from the same window so it inherits the environment variable. Never paste a key into chat, commands, or Git. The app does not save the key; closing that PowerShell window removes it from that process. Failed or blocked responses leave earlier results and selections intact; successful reruns replace them. Google integration has automated mock coverage but requires a real API-key test.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+```
+
+The backend inherits these variables; the app does not store the keys. The commands overwrite the current clipboard with a space; clipboard history may still retain the keys if enabled. Closing the PowerShell windows clears the variables from those processes. Never paste keys into chat, screenshots, commands or Git.

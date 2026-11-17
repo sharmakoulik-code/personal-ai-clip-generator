@@ -36,16 +36,18 @@ def list_jobs(video_id: str) -> list[dict]:
         return [dict(row) for row in db.execute('SELECT * FROM analysis_jobs WHERE video_id=? ORDER BY rowid DESC LIMIT 30', (video_id,))]
 
 
-def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, groq_titles: bool = False, gemini_titles: bool = False) -> dict:
+def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, groq_titles: bool = False, gemini_titles: bool = False, cloud_titles: bool = False) -> dict:
     if groq_titles and not os.environ.get('GROQ_API_KEY', '').strip():
         raise ValueError('GROQ_API_KEY is not configured in the backend environment.')
     if gemini_titles and not os.environ.get('GEMINI_API_KEY', '').strip():
         raise ValueError('GEMINI_API_KEY is not configured in the backend environment.')
+    if cloud_titles and not any(os.environ.get(key, '').strip() for key in ('GROQ_API_KEY', 'GEMINI_API_KEY')):
+        raise ValueError('Cloud AI requires GROQ_API_KEY or GEMINI_API_KEY in the backend environment.')
     job_id = uuid.uuid4().hex
     try:
         with database.connect() as db:
-            db.execute('''INSERT INTO analysis_jobs (id,video_id,project_id,model,min_duration,max_duration,force_transcribe,groq_titles,gemini_titles,status,stage)
-                          VALUES (?,?,?,?,?,?,?,?,?,'pending','Queued')''', (job_id, video['id'], video['project_id'], model, minimum, maximum, int(force), int(groq_titles), int(gemini_titles)))
+            db.execute('''INSERT INTO analysis_jobs (id,video_id,project_id,model,min_duration,max_duration,force_transcribe,groq_titles,gemini_titles,cloud_titles,status,stage)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,'pending','Queued')''', (job_id, video['id'], video['project_id'], model, minimum, maximum, int(force), int(groq_titles), int(gemini_titles), int(cloud_titles)))
     except sqlite3.IntegrityError as exc:
         raise ValueError('An analysis is already active for this video.') from exc
     return job_detail(job_id)
@@ -216,6 +218,28 @@ def store_results(job: dict, language: str | None, segments: list[dict], candida
         db.execute("UPDATE analysis_jobs SET status='completed', stage='Analysis completed', progress=100, completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (job['id'],))
 
 
+def cloud_enhance(job_id: str, clips: list[dict]) -> tuple[list[dict], str]:
+    """Try configured providers in order; never silently downgrade to local."""
+    failures = []
+    providers = (('Groq', 'GROQ_API_KEY', groq_enhancement),
+                 ('Google Gemini', 'GEMINI_API_KEY', gemini_enhancement))
+    for name, env, service in providers:
+        check_cancel(job_id)
+        if not os.environ.get(env, '').strip():
+            continue
+        update(job_id, stage=f'Cloud AI: trying {name}')
+        try:
+            return service.enhance(clips, lambda: check_cancel(job_id)), name
+        except ValueError:
+            # Provider helpers expose sanitized errors, but don't pass through
+            # arbitrary details, responses or keys when both providers fail.
+            failures.append(name)
+            check_cancel(job_id)
+    if not failures:
+        raise ValueError('Cloud AI needs GROQ_API_KEY or GEMINI_API_KEY in the backend environment.')
+    raise ValueError('Cloud AI failed with ' + ' and '.join(failures) + '. Check provider keys, model access, quota and connection; previous results were kept.')
+
+
 def run_job(job: dict) -> None:
     try:
         check_cancel(job['id'])
@@ -232,6 +256,8 @@ def run_job(job: dict) -> None:
             raise ValueError('No speech was detected. No transcript or clips were saved.')
         update(job['id'], stage='Detecting and scoring candidate clips')
         clips = clip_selection.generate_candidates(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']))
+        if job['cloud_titles'] and clips:
+            clips, _provider = cloud_enhance(job['id'], clips)
         if job['groq_titles'] and clips:
             check_cancel(job['id']); update(job['id'], stage='Improving titles with Groq')
             clips = groq_enhancement.enhance(clips, lambda: check_cancel(job['id']))

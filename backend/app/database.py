@@ -101,6 +101,6 @@ def initialize() -> None:
 
         # Existing Phase 3 databases predate optional Groq enhancements.
         columns = {row['name'] for row in connection.execute('PRAGMA table_info(analysis_jobs)')}
-        for name in ('groq_titles', 'gemini_titles'):
+        for name in ('groq_titles', 'gemini_titles', 'cloud_titles'):
             if name not in columns:
                 connection.execute(f'ALTER TABLE analysis_jobs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')

@@ -26,7 +26,7 @@ export default function AnalysisPanel({ videoId, hasAudio }: Props) {
   const [model, setModel] = useState('base');
   const [range, setRange] = useState('30-45');
   const [force, setForce] = useState(false);
-  const [titleProvider, setTitleProvider] = useState<'local' | 'groq' | 'gemini'>('local');
+  const [titleProvider, setTitleProvider] = useState<'local' | 'cloud'>('local');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
@@ -57,7 +57,7 @@ export default function AnalysisPanel({ videoId, hasAudio }: Props) {
 
   async function start() {
     setBusy(true); setError('');
-    try { await api(`/api/videos/${videoId}/analyze`, json('POST', { model, duration_range: range, force_transcribe: force, groq_titles: titleProvider === 'groq', gemini_titles: titleProvider === 'gemini' })); await refresh(); }
+    try { await api(`/api/videos/${videoId}/analyze`, json('POST', { model, duration_range: range, force_transcribe: force, cloud_titles: titleProvider === 'cloud' })); await refresh(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not start analysis.'); }
     finally { setBusy(false); }
   }
@@ -86,8 +86,8 @@ export default function AnalysisPanel({ videoId, hasAudio }: Props) {
     <div className="analysis-heading"><div><h3>AI analysis</h3><p>Local Whisper transcription and explainable transcript-based suggestions.</p></div></div>
     {!hasAudio && <p className="analysis-notice">This video has no audio stream to transcribe.</p>}
     <div className="analysis-options"><label>Whisper model<select className="ingest-control" value={model} onChange={e => setModel(e.target.value)} disabled={busy || active(job)}><option value="tiny">Tiny (fastest)</option><option value="base">Base (default)</option><option value="small">Small</option><option value="medium">Medium</option></select></label><label>Clip duration<select className="ingest-control" value={range} onChange={e => setRange(e.target.value)} disabled={busy || active(job)}><option value="15-30">15–30 seconds</option><option value="30-45">30–45 seconds</option><option value="45-60">45–60 seconds</option><option value="60-90">60–90 seconds</option></select></label><label className="force-checkbox"><input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} disabled={busy || active(job)} /> Re-transcribe even if cached</label></div>
-    <label>Title and explanation provider <select className="ingest-control" value={titleProvider} onChange={e => setTitleProvider(e.target.value as 'local' | 'groq' | 'gemini')} disabled={busy || active(job)}><option value="local">Local only (no cloud)</option><option value="groq">Groq</option><option value="gemini">Google Gemini</option></select></label>
-    {titleProvider !== 'local' && <p className="analysis-notice">Candidate transcript excerpts will be sent to {titleProvider === 'groq' ? 'Groq' : 'Google Gemini'}. The video is not uploaded. {titleProvider === 'gemini' && 'Google may use content to improve its products on the free tier. '}Review your provider's privacy terms and quota.</p>}
+    <label>Title and explanation provider <select className="ingest-control" value={titleProvider} onChange={e => setTitleProvider(e.target.value as 'local' | 'cloud')} disabled={busy || active(job)}><option value="local">Local only (no cloud)</option><option value="cloud">Cloud AI (Groq with Gemini fallback)</option></select></label>
+    {titleProvider === 'cloud' && <p className="analysis-notice">Cloud AI tries Groq first, then Google Gemini if Groq fails or is not configured. Candidate transcript excerpts may be sent to both; the video is not uploaded. Google may use content to improve its products on the free tier. Check both providers' privacy terms and quotas.</p>}
     <p className="analysis-notice">The selected model downloads on first use. Re-analysis replaces previous clip suggestions and selections only after success.</p>
     {error && <div className="error" role="alert"><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
     <button className="primary-btn" onClick={() => void start()} disabled={!hasAudio || busy || active(job)}>{transcript ? 'Run analysis again' : 'Analyze Video with AI'}</button>
