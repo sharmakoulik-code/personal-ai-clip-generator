@@ -1,12 +1,10 @@
 # Backend
 
-This FastAPI application initializes a local SQLite database and exposes health and project-library endpoints under `/api`. From the repository root on Windows:
+The FastAPI API stores project, ingestion job, and video metadata in SQLite. Large files go into local storage, not the database. The default server command is:
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 cd backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Visit http://127.0.0.1:8000/api/health to check it. The API has no authentication: do not expose it on a network. SQLite defaults to `backend/data/clips.sqlite3`; `CLIP_DB_PATH` overrides its location. Uploading, downloading, AI processing, and rendering are not implemented in Phase 1.
+Install the dependencies in `requirements.txt` first. FFmpeg and FFprobe must be on PATH for video processing. `CLIP_DB_PATH`, `CLIP_STORAGE_PATH`, `CLIP_MAX_UPLOAD_BYTES`, `CLIP_FFMPEG` and `CLIP_FFPROBE` are optional backend-only settings. The API has no authentication: never expose it to an untrusted network. See the root README for Windows setup and current Phase 2 validation limitations.
