@@ -26,7 +26,7 @@ describe('AI analysis', () => {
     await user.click(screen.getByRole('button', { name: 'Analyze Video with AI' }));
     expect(await screen.findByText('Transcribing video')).toBeTruthy();
     expect(screen.getByText('37% of source audio')).toBeTruthy();
-    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'tiny', duration_range: '15-30', force_transcribe: false }) }));
+    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'tiny', duration_range: '15-30', force_transcribe: false, groq_titles: false }) }));
     expect((screen.getByRole('button', { name: 'Analyze Video with AI' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -58,6 +58,21 @@ describe('AI analysis', () => {
     await user.click(screen.getByText(/View full transcript/));
     expect(screen.getByText('Short clip. Full transcript.')).toBeTruthy();
     expect(mock).toHaveBeenCalledWith('/api/videos/v1/clips/selection', expect.objectContaining({ method: 'PATCH' }));
+  });
+
+  it('sends the Groq opt-in explicitly when selected', async () => {
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/analyze') && init?.method === 'POST') return response({ id: 'j1' }, 202);
+      if (path.endsWith('/transcription')) return response({}, 404);
+      return response([]);
+    });
+    vi.stubGlobal('fetch', mock);
+    const user = userEvent.setup();
+    render(<AnalysisPanel videoId="v1" hasAudio />);
+    await user.click(screen.getByLabelText(/Improve titles and explanations with Groq/));
+    await user.click(screen.getByRole('button', { name: 'Analyze Video with AI' }));
+    expect(mock).toHaveBeenCalledWith('/api/videos/v1/analyze', expect.objectContaining({ body: JSON.stringify({ model: 'base', duration_range: '30-45', force_transcribe: false, groq_titles: true }) }));
   });
 
   it('cancels a running analysis', async () => {

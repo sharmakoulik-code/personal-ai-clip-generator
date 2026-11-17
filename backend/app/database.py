@@ -98,3 +98,8 @@ def initialize() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_analysis_per_video
             ON analysis_jobs(video_id) WHERE status IN ('pending','running')
         """)
+
+        # Existing Phase 3 databases predate optional Groq enhancements.
+        columns = {row['name'] for row in connection.execute('PRAGMA table_info(analysis_jobs)')}
+        if 'groq_titles' not in columns:
+            connection.execute('ALTER TABLE analysis_jobs ADD COLUMN groq_titles INTEGER NOT NULL DEFAULT 0')

@@ -249,3 +249,86 @@ def test_unpunctuated_speech_is_split_at_word_boundaries():
     candidates = clip_selection.generate_candidates(segments, 15, 30)
     assert candidates and all(15 <= c['end'] - c['start'] <= 30 for c in candidates)
     assert all(c['transcript'].replace(' ', '') in segments[0]['text'].replace(' ', '') for c in candidates)
+
+
+def test_groq_enhances_cached_transcript_without_changing_timestamps(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    client, _ = configured
+    calls = []
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    monkeypatch.setattr(analysis, 'transcribe', lambda video, job: ('en', fake_segments()))
+    original_job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, original_job['id'])['status'] == 'completed'
+    original = client.get('/api/videos/vid/clips').json()
+    def fake_post(url, **kwargs):
+        assert url == 'https://api.groq.com/openai/v1/chat/completions'
+        assert kwargs['headers']['Authorization'] == 'Bearer test-only-key'
+        assert kwargs['follow_redirects'] is False
+        import json
+        payload = json.loads(kwargs['json']['messages'][1]['content'])
+        calls.append(payload)
+        content = json.dumps({'clips': [{'id': c['id'], 'title': 'A useful lesson', 'reason': 'Explains a useful idea.'} for c in payload]})
+        return httpx.Response(200, json={'choices': [{'message': {'content': content}}]})
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fake_post)
+    def must_not_transcribe(*args): raise AssertionError('should reuse transcript')
+    monkeypatch.setattr(analysis, 'transcribe', must_not_transcribe)
+    second = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'groq_titles': True}).json()
+    assert wait_job(client, second['id'])['status'] == 'completed'
+    enhanced = client.get('/api/videos/vid/clips').json()
+    assert calls and all(c['title'] == 'A useful lesson' and c['reason'].startswith('Groq suggestion (review):') for c in enhanced)
+    assert [(c['start'], c['end'], c['score'], c['hook']) for c in enhanced] == [(c['start'], c['end'], c['score'], c['hook']) for c in original]
+    assert 'test-only-key' not in str(client.get('/api/videos/vid/analysis-jobs').json())
+
+
+def test_groq_missing_key_and_failure_preserve_existing_results(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    client, _ = configured
+    monkeypatch.delenv('GROQ_API_KEY', raising=False)
+    assert client.post('/api/videos/vid/analyze', json={'groq_titles': True}).status_code == 409
+    monkeypatch.setattr(analysis, 'transcribe', lambda video, job: ('en', fake_segments()))
+    first = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    old = client.get('/api/videos/vid/clips').json()
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *args, **kwargs: httpx.Response(429, text='secret text not exposed'))
+    second = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'groq_titles': True}).json()
+    failed = wait_job(client, second['id'])
+    assert failed['status'] == 'failed' and 'quota' in failed['error']
+    assert 'secret' not in failed['error'] and 'test-only-key' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json() == old
+
+
+def test_groq_rejects_fabricated_candidate_ids(monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **kw: httpx.Response(200, json={'choices': [{'message': {'content': '{"clips":[{"id":"wrong","title":"x","reason":"y"}]}'}}]}))
+    with pytest.raises(ValueError, match='invalid response'):
+        groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
+
+
+def test_groq_column_migrates_existing_database(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / 'old.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE analysis_jobs (id TEXT PRIMARY KEY, video_id TEXT, status TEXT)')
+        db.execute("INSERT INTO analysis_jobs (id, video_id, status) VALUES ('old', 'video', 'completed')")
+    monkeypatch.setenv('CLIP_DB_PATH', str(path))
+    database.initialize()
+    database.initialize()  # migration is idempotent
+    with database.connect() as db:
+        row = db.execute("SELECT id, groq_titles FROM analysis_jobs WHERE id='old'").fetchone()
+        assert row['groq_titles'] == 0
+
+
+def test_groq_network_errors_do_not_expose_details(monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    monkeypatch.setenv('GROQ_API_KEY', 'test-only-key')
+    def fail(*a, **kw): raise httpx.ConnectError('sensitive detail test-only-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fail)
+    with pytest.raises(ValueError) as err:
+        groq_enhancement.enhance([{'id': 'real', 'transcript': 'Actual words.'}])
+    assert 'test-only-key' not in str(err.value) and 'sensitive' not in str(err.value)

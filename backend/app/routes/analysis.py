@@ -1,6 +1,6 @@
 """Endpoints for locally transcribing and selecting suggested moments."""
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 from .. import database
 from ..services import analysis, ingestion
@@ -12,6 +12,7 @@ class AnalysisRequest(BaseModel):
     model: str = 'base'
     duration_range: str = '30-45'
     force_transcribe: bool = False
+    groq_titles: bool = False
 
     @field_validator('model')
     @classmethod
@@ -49,7 +50,7 @@ def analyze(video_id: str, body: AnalysisRequest):
         raise HTTPException(422, 'Video duration is unavailable.')
     minimum, maximum = (int(x) for x in body.duration_range.split('-'))
     try:
-        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe))
+        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe, body.groq_titles))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
