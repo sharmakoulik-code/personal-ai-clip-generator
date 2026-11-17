@@ -101,6 +101,8 @@ def delete_video(video_id: str) -> bool:
         if not row:
             return False
         video = dict(row)
+        if db.execute("SELECT 1 FROM analysis_jobs WHERE video_id=? AND status IN ('pending','running')", (video_id,)).fetchone():
+            raise RuntimeError('Cancel the active analysis before deleting this video.')
         for key in ('path', 'thumbnail_path'):
             if video[key]:
                 path = Path(video[key]).resolve()

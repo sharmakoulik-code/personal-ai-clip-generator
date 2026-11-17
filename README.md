@@ -1,8 +1,8 @@
 # Personal AI Clip Generator
 
-A local, single-user workspace. It contains a React/TypeScript/Tailwind dashboard, FastAPI and SQLite project history, and an **in-progress Phase 2 ingestion implementation**. No accounts, payment features, cloud storage or publishing are included. AI, transcription, captions and clip rendering are not implemented.
+A local, single-user workspace. It contains a React/TypeScript/Tailwind dashboard, FastAPI and SQLite project history, video ingestion, and an **in-progress Phase 3 analysis implementation**. No accounts, payment features, cloud storage or publishing are included. Clip rendering and captions are not implemented.
 
-Phase 2 supports streamed local video uploads, YouTube metadata and download jobs through yt-dlp, FFprobe validation, local storage, job polling, cancellation, and project/video deletion. Only import videos you own or have permission to download; do not bypass access controls. The YouTube download and Windows end-to-end paths still require validation on a Windows computer with a permitted YouTube video.
+Phase 2 supports streamed local video uploads, YouTube metadata and download jobs through yt-dlp, FFprobe validation, local storage, job polling, cancellation, and project/video deletion. Only import videos you own or have permission to download; do not bypass access controls. Local upload, a YouTube download, persistence, cancellation, and deletion were tested by the user on Windows; Phase 3 still needs Windows validation.
 
 ## Windows requirements
 
@@ -56,3 +56,19 @@ npm run build
 ```
 
 The video tests use real FFmpeg/FFprobe when available; YouTube tests use controlled mocks, not a real YouTube connection. Review dependency advisories before deployment; this app is for local personal use only.
+
+## Phase 3: local speech analysis (Windows validation pending)
+
+After importing a video with an audio track, select its project and choose **Analyze Video with AI** next to the video. Select a model and clip-duration range, then start analysis. The worker extracts bounded 60-second audio windows with a small overlap, runs faster-whisper with word timestamps, stores the transcript in SQLite and ranks suggestions and suppresses heavily overlapping results. Stages and transcription progress come from actual work; the initial model download has no percentage. Cancellation is checked between extraction/transcription steps, so a model download or inference operation may take time to stop.
+
+Whisper Base is the default; Tiny is faster, while Small and Medium need more memory and time. The first run downloads the chosen CTranslate2 model from Hugging Face into `storage/models/`; subsequent runs reuse the cached model. An internet connection and disk space are needed for the first download; no paid API is required. For an offline installation, place a compatible converted model under `storage/models/whisper-tiny`, `whisper-base`, `whisper-small`, or `whisper-medium` including `model.bin`, `config.json`, tokenizer and vocabulary files. Models and media are ignored by Git. A suitable Python environment installs the `faster-whisper` dependency when the startup script runs.
+
+The default device is CPU (int8). To try CUDA on a compatible NVIDIA system, set `$env:CLIP_WHISPER_DEVICE = 'cuda'` in the PowerShell window **before** launching the startup script; CUDA and CTranslate2's required GPU libraries must already be installed. `'auto'` attempts GPU detection and otherwise uses CPU; `'cpu'` forces CPU. GPU operation is not yet validated on Windows.
+
+The score is a **local heuristic**, not a virality prediction or semantic LLM assessment. It combines lexical signals, punctuation, sentence/clause boundaries, and standalone-context indicators. Keyword signals are primarily English; multilingual speech is supported by Whisper, but ranking in other languages is limited. Titles and hooks are literal transcript excerpts, not generated claims. Whisper can mistranscribe or hallucinate; zero-duration word timestamps are excluded, and clips may be unavailable if no spoken span fits the chosen range. Review the transcript, boundaries, and score before using any suggestion. Audio decoding is chunked, but transcript data grows with video length; ranking keeps a bounded pool of 3,000 windows and shows at most 30 suggestions. This cap can omit useful moments from very long videos. No LLM, scene detection, clip rendering or captions are implemented in this phase.
+
+Existing transcripts are reused when the same model is selected. To obtain a fresh transcription, check **Re-transcribe even if cached**. Re-running analysis keeps old results until the new run succeeds, then replaces the previous clips and their selections. Individual selections and transcripts persist across restarts. Deleting a video or project removes its associated transcript, analysis jobs and clips; active analysis must be cancelled first. Interrupted running analyses are marked failed after a restart; pending analyses remain queued. Run only one backend process at a time.
+
+### Additional tests
+
+Backend tests cover local job states, clip scoring, selection persistence, no-audio handling and chunk boundaries. The optional real-Whisper integration test needs FFmpeg/FFprobe plus `CLIP_TEST_MODEL_DIR` pointing to a local converted Base model and `CLIP_TEST_SPEECH_VIDEO` pointing to a short MP4 containing the public JFK speech fixture; without both it is skipped. For example in PowerShell, set those environment variables before running `pytest`. Frontend tests mock API responses and cover starting analysis, progress, sorting, transcript viewing and selections.
