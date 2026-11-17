@@ -1,14 +1,31 @@
 # Personal AI Clip Generator
 
-A private, local workspace for turning videos into short clips. **Phase 1 only** is implemented: a React/TypeScript/Tailwind dashboard, FastAPI API, and SQLite-backed project library. You can create, list, and delete named projects; the dashboard reports backend connectivity and persists history across restarts.
+A private-by-design, locally running workspace. **Phase 1** provides a dark React/TypeScript/Tailwind dashboard, a FastAPI backend and SQLite-backed project history. Create and delete named projects; they persist after restart. There are no accounts or payment features.
 
-Video uploads and YouTube importing, background processing, transcription, AI, rendering, captions, editing and downloads are **not implemented yet**. The dashboard's roadmap describes future work, not working features. No account, cloud service, or API key is required for Phase 1.
+The YouTube URL and file inputs are **disabled**: importing video is Phase 2. Background jobs, AI, video processing, captions, preview and downloads are not implemented. No FFmpeg or API key is needed yet. Local execution does not change GitHub repository visibility; keep the repository private if its contents should not be public.
 
-## Run locally on Windows
+## Windows: download and run
 
-Prerequisites: Python 3.11 or newer, Node.js 22.12+ on the 22.x line, 24.x, or 26+ (Node 22 LTS recommended), and npm. Open PowerShell in the repository directory. Run the backend and frontend in separate terminals:
+Install [Git for Windows](https://git-scm.com/download/win), Python 3.11+ (with the `py` launcher), and Node.js 22.12+ on the 22.x line, 24.x, or 26+ (includes npm). Open PowerShell:
 
-**Terminal 1 — backend**
+```powershell
+git clone https://github.com/sharmakoulik-code/personal-ai-clip-generator.git
+cd personal-ai-clip-generator
+```
+
+Run the startup script from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+```
+
+It installs dependencies, then opens separate PowerShell windows for the backend and frontend. Once both are ready, visit **http://127.0.0.1:5173**. To stop, press Ctrl+C in each server window (answer `Y` if asked), then close those windows. If either server fails, its window shows the error. The script checks that ports 8000 and 5173 are available before launching.
+
+### Manual startup
+
+Use two PowerShell terminals, each starting in the repository root.
+
+**Terminal 1 — FastAPI**
 
 ```powershell
 py -3 -m venv .venv
@@ -17,35 +34,29 @@ cd backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-**Terminal 2 — frontend**
+**Terminal 2 — React/Vite**
 
 ```powershell
 cd frontend
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-Open the localhost URL printed by Vite (normally http://localhost:5173). Keep both terminals open. The frontend proxies `/api` requests to the local backend; start the backend on port 8000. Stop either server with Ctrl+C. The SQLite database is created automatically at `backend/data/clips.sqlite3` and is not tracked by Git. To use a different database location, set `CLIP_DB_PATH` in the backend terminal before starting it (e.g. `$env:CLIP_DB_PATH = "C:\clips\projects.sqlite3"`). Back up this file to retain project history.
+For later starts, the venv creation and dependency installation steps can be skipped unless dependencies change. The frontend proxies `/api` requests to FastAPI on port 8000. Check the backend at http://127.0.0.1:8000/api/health. Both commands bind to `127.0.0.1` only; **there is no authentication**, so do not expose either server to a network.
 
-The servers bind to localhost by default and have **no authentication**, so do not expose them to the internet or an untrusted network. No FFmpeg, AI model, or API key is needed yet.
+The backend creates `backend/data/clips.sqlite3` automatically. The file is ignored by Git: back it up to retain your project history. To change its location, set `$env:CLIP_DB_PATH = 'C:\clips\projects.sqlite3'` in the backend terminal before starting it.
 
 ## Tests
 
-Install backend test dependencies and run:
+From the repository root on Windows:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 cd backend
 ..\.venv\Scripts\python.exe -m pytest -q
-```
-
-In another terminal, run frontend tests and a production build:
-
-```powershell
-cd frontend
-npm ci
+cd ..\frontend
 npm test
 npm run build
 ```
 
-The frontend tests use mocked HTTP responses; backend tests use a temporary SQLite database. The Vite development proxy is used for the local running experience.
+Backend tests use a temporary SQLite database. Frontend tests use mocked HTTP responses; the Vite development proxy connects the running frontend to the real backend.

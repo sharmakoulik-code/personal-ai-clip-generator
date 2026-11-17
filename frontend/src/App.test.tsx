@@ -23,6 +23,8 @@ describe('dashboard', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText('No projects just yet');
+    expect((screen.getByLabelText('YouTube URL') as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText('Upload a video') as HTMLInputElement).disabled).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Create your first project' }));
     await user.type(screen.getByLabelText('Project name'), 'My video');
     await user.click(screen.getByRole('button', { name: 'Create project' }));
