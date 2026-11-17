@@ -71,6 +71,8 @@ def test_real_upload_validation_and_restart(setup, sample_video, monkeypatch):
     assert len(stored) == 1 and stored[0].read_bytes() == file_bytes
     # A new FastAPI lifespan uses the same on-disk SQLite database.
     ingestion.stop_worker()
+    from app.services import analysis
+    analysis.stop_worker()
     with TestClient(app) as restarted:
         assert restarted.get(f"/api/projects/{project['id']}/videos").json()[0]['id'] == video['id']
         assert restarted.get(f"/api/jobs/{job['id']}").json()['status'] == 'completed'

@@ -32,8 +32,8 @@ def delete_project(project_id: int) -> bool:
         if not connection.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
             return False
         active = connection.execute("SELECT 1 FROM jobs WHERE project_id=? AND status IN ('pending','uploading','retrieving metadata','downloading','validating')", (project_id,)).fetchone()
-        if active:
-            raise ValueError('Cancel active imports before deleting this project.')
+        if active or connection.execute("SELECT 1 FROM analysis_jobs WHERE project_id=? AND status IN ('pending','running')", (project_id,)).fetchone():
+            raise ValueError('Cancel active imports and analyses before deleting this project.')
         media.remove_project_files(project_id)
         connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     return True

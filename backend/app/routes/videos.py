@@ -186,6 +186,8 @@ def thumbnail(video_id: str):
 def delete_video(video_id: str):
     try:
         deleted = ingestion.delete_video(video_id)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(500, 'Could not remove video files; check file permissions and try again.') from exc
     if not deleted:

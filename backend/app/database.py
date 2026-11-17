@@ -59,3 +59,48 @@ def initialize() -> None:
                 completed_at TEXT
             )
         """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS transcripts (
+                video_id TEXT PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+                model TEXT NOT NULL, language TEXT, duration REAL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS transcript_segments (
+                video_id TEXT NOT NULL REFERENCES transcripts(video_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL, start REAL NOT NULL, end REAL NOT NULL,
+                text TEXT NOT NULL, words_json TEXT NOT NULL,
+                PRIMARY KEY (video_id, position)
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_clips (
+                id TEXT PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                start REAL NOT NULL, end REAL NOT NULL, title TEXT NOT NULL, hook TEXT NOT NULL,
+                transcript TEXT NOT NULL, reason TEXT NOT NULL, score INTEGER NOT NULL,
+                scores_json TEXT NOT NULL, selected INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_jobs (
+                id TEXT PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                model TEXT NOT NULL, min_duration INTEGER NOT NULL, max_duration INTEGER NOT NULL,
+                force_transcribe INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL, stage TEXT NOT NULL, progress REAL,
+                cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                completed_at TEXT
+            )
+        """)
+        connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_analysis_per_video
+            ON analysis_jobs(video_id) WHERE status IN ('pending','running')
+        """)
+
+        # Existing Phase 3 databases predate optional Groq enhancements.
+        columns = {row['name'] for row in connection.execute('PRAGMA table_info(analysis_jobs)')}
+        for name in ('groq_titles', 'gemini_titles', 'cloud_titles'):
+            if name not in columns:
+                connection.execute(f'ALTER TABLE analysis_jobs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
