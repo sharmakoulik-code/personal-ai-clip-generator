@@ -4,7 +4,7 @@ import os
 
 import httpx
 
-from .provider_errors import ProviderError
+from .provider_errors import ProviderError, SAFE_DIAGNOSES, google_error_category
 
 # Stable Gemini Developer API model; access, quotas and pricing depend on account.
 _MODEL = 'gemini-3.5-flash-lite'
@@ -34,10 +34,9 @@ def enhance(clips: list[dict], check_cancel=lambda: None) -> list[dict]:
         except httpx.HTTPError:
             raise ProviderError('network', 'Could not reach Google Gemini. Check the network connection and try again.') from None
         check_cancel()
-        if response.status_code == 400:
-            raise ProviderError('request', 'Google Gemini rejected the request (HTTP 400). Check model settings and app updates.')
-        if response.status_code in (401, 403):
-            raise ProviderError('auth', 'Google Gemini rejected the API key or model access. Check your local configuration.')
+        if response.status_code in (400, 401, 403):
+            category = google_error_category(response)
+            raise ProviderError(category, 'Google Gemini: ' + SAFE_DIAGNOSES[category] + '.')
         if response.status_code == 404:
             raise ProviderError('unavailable', 'Google Gemini model or endpoint unavailable (HTTP 404). Check model access and app updates.')
         if response.status_code == 429:
