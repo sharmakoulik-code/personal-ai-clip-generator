@@ -132,3 +132,22 @@ API subject tracking can optionally use a mouth-motion active-speaker heuristic 
 Optional burned-in captions use stored word timestamps and local FFmpeg/libass. The render API supports `captions`, `caption_style` (`highlight`, `classic`, `minimal`) and `caption_uppercase`; `/api/clips/{id}/captions.srt` exports a plain SRT. Missing timed words fail explicitly. Set `CLIP_CAPTION_FONT` (default Arial; try Montserrat or Impact) and optionally `CLIP_CAPTION_FONTS_DIR` before startup. Font files are copied temporarily for FFmpeg; an FFmpeg build with the `ass` filter is required. Use the render panel to enable captions and choose a style. Check timing, legibility and platform-safe placement yourself.
 
 The analysis API also offers opt-in `selection_mode: "llm"`: numbered sentence transcript excerpts and timings (not video) are sent to Groq, with Gemini fallback. The LLM suggests sentence indices, titles, explanations and scores; the app validates indices and derives timestamps locally, enforces duration and overlap limits, and blends AI and local scores. Provider failures or no valid selections leave prior results unchanged. AI-picked mode supersedes the title-provider flags. Its choices can still be inaccurate or lack context; review every clip and provider privacy terms. Choose AI-picked in the analysis form to opt in.
+
+### Experimental Shorts framing API
+
+The existing render API has experimental `auto`, `follow`, `fit_blur`, two-face `stack`, and explicit `letterbox` layouts. See the backend README for settings and fallback behavior. Review results manually, especially for changing scenes and speakers.
+
+The backend also caches an experimental local preflight and accepts an explicit `preset: "shorts"` render option. The project workflow exposes these in its Shorts controls. See the backend README for limitations, endpoints and compatibility behavior; verify publishing requirements against YouTube's current documentation.
+
+Hook-first selection has initial validation and ranking changes. The explicit Shorts render preset has experimental filler/pause cutting, and render-specific SRT/VTT downloads use the saved edited timeline.
+
+
+### YouTube Shorts workflow
+
+The project analysis view defaults to a 20–45 second strategy and the render panel defaults to YouTube Shorts (1080×1920 H.264/AAC, auto layout, captions and tightening). Review preflight warnings and the crop; caption detection, face tracking and speaker selection are heuristics. The review panel provides trim nudges, revert, safe-zone overlay and crop offset. Use render-specific SRT/VTT downloads so subtitle timing follows the exported edit. Old renders without a saved timeline need to be rendered again for synchronized downloads. When cloud metadata is explicitly enabled, only clip transcript text and the existing video title are sent to Groq and then Gemini as a fallback; no video or paths are uploaded. Without opt-in or configured keys, metadata uses a basic local title. Review generated text and rights before upload.
+
+These settings reflect YouTube guidance as of late 2026; **verify current YouTube rules** before publishing. See `backend/README.md` for endpoints, options, technical limitations and environment configuration.
+
+### Cinematic bars
+
+Choose **Cinematic bars** to fit the entire source inside a solid portrait canvas without face tracking, cropping or blur. The background colour accepts six-digit hex; vertical position and a soft edge are optional. Captions default to on-video, constrained by the safe zone when possible; if there is insufficient room they fall back to the safe-zone placement. The preview shows the video rectangle and bars. An exact 9:16 source fills the canvas; sources narrower than 9:16 keep their full image with side bars rather than being cropped or stretched. Check the finished video and captions manually.

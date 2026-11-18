@@ -1,9 +1,11 @@
 """Endpoints for locally transcribing and selecting suggested moments."""
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from .. import database
-from ..services import analysis, ingestion
+from ..services import analysis, ingestion, metadata, shorts
 
 router = APIRouter(prefix='/api')
 
@@ -32,7 +34,7 @@ class AnalysisRequest(BaseModel):
     @field_validator('duration_range')
     @classmethod
     def valid_duration(cls, value):
-        if value not in {'15-30', '30-45', '45-60', '60-90'}: raise ValueError('Unsupported duration range')
+        if value not in {'15-30', '30-45', '45-60', '60-90', '20-45', '20-60', '20-180'}: raise ValueError('Unsupported duration range')
         return value
 
 
@@ -115,11 +117,69 @@ def clip(clip_id: str):
     return next(c for c in analysis.list_clips(row['video_id']) if c['id'] == clip_id)
 
 
-@router.patch('/clips/{clip_id}')
-def select_clip(clip_id: str, body: Selection):
+class MetadataRequest(BaseModel):
+    tone: Literal['curious','direct','funny'] = 'curious'
+    language: str | None = Field(default=None, min_length=2, max_length=35, pattern=r'^[A-Za-z][A-Za-z0-9-]*$')
+    cloud: bool = False  # Explicit opt-in to send text to providers.
+
+
+@router.get('/clips/{clip_id}/metadata')
+def get_metadata(clip_id: str):
+    clip(clip_id)
+    result=metadata.get(clip_id)
+    if not result: raise HTTPException(404, 'No metadata generated for this clip')
+    return result
+
+
+@router.post('/clips/{clip_id}/metadata')
+def create_metadata(clip_id: str, body: MetadataRequest):
     with database.connect() as db:
-        cur = db.execute('UPDATE candidate_clips SET selected=? WHERE id=?', (int(body.selected), clip_id))
-    if not cur.rowcount: raise HTTPException(404, 'Clip not found')
+        row=db.execute('SELECT c.transcript,c.video_id,c.start,c.end,c.original_start,v.title FROM candidate_clips c JOIN videos v ON v.id=c.video_id WHERE c.id=?',(clip_id,)).fetchone()
+    if not row: raise HTTPException(404, 'Clip not found')
+    try:
+        text=row['transcript']
+        if row['original_start'] is not None:
+            transcript=analysis.get_transcript(row['video_id']) or {}
+            words=[w for segment in transcript.get('segments',[]) for w in segment.get('words',[]) if isinstance(w,dict)]
+            from ..services import tighten
+            text=' '.join(w['word'].strip() for w in tighten.remap_words(words,[(row['start'],row['end'])])).strip()
+            if not text: raise ValueError('Timed transcript words are required to generate metadata for a trimmed clip.')
+        result=metadata.generate(text,row['title'],body.tone,body.language,body.cloud)
+        return metadata.save(clip_id,row['transcript'],row['title'],result,row['start'],row['end'])
+    except ValueError as exc: raise HTTPException(409,str(exc)) from exc
+
+
+class ClipUpdate(BaseModel):
+    selected: bool | None = None
+    start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    end: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+@router.patch('/clips/{clip_id}')
+def select_clip(clip_id: str, body: ClipUpdate):
+    if body.selected is None and body.start is None and body.end is None: raise HTTPException(422,'No clip changes supplied')
+    with database.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row=db.execute('SELECT c.*,v.duration FROM candidate_clips c JOIN videos v ON v.id=c.video_id WHERE c.id=?',(clip_id,)).fetchone()
+        if not row: raise HTTPException(404,'Clip not found')
+        if (body.start is not None or body.end is not None) and db.execute("SELECT 1 FROM renders WHERE clip_id=? AND status IN ('pending','running')",(clip_id,)).fetchone(): raise HTTPException(409,'Cancel the active render before trimming.')
+        start=row['start'] if body.start is None else body.start; end=row['end'] if body.end is None else body.end
+        if body.start is not None or body.end is not None:
+            if not row['duration'] or start<0 or end>row['duration'] or end-start<3 or end-start>shorts.MAX_DURATION: raise HTTPException(422,'Clip range must be within the source and between 3 and 180 seconds.')
+            db.execute('UPDATE candidate_clips SET original_start=COALESCE(original_start,start),original_end=COALESCE(original_end,end),start=?,end=? WHERE id=?',(start,end,clip_id))
+        if body.selected is not None: db.execute('UPDATE candidate_clips SET selected=? WHERE id=?',(int(body.selected),clip_id))
+    return clip(clip_id)
+
+
+@router.post('/clips/{clip_id}/revert')
+def revert_clip(clip_id: str):
+    with database.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row=db.execute('SELECT * FROM candidate_clips WHERE id=?',(clip_id,)).fetchone()
+        if not row: raise HTTPException(404,'Clip not found')
+        if db.execute("SELECT 1 FROM renders WHERE clip_id=? AND status IN ('pending','running')",(clip_id,)).fetchone(): raise HTTPException(409,'Cancel the active render before reverting.')
+        if row['original_start'] is not None and row['original_end'] is not None:
+            db.execute('UPDATE candidate_clips SET start=original_start,end=original_end,original_start=NULL,original_end=NULL WHERE id=?',(clip_id,))
     return clip(clip_id)
 
 

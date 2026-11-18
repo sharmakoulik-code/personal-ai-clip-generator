@@ -127,3 +127,10 @@ describe('AI-picked clip selection', () => {
     expect((screen.getByLabelText('Clip to preview') as HTMLSelectElement).value).toBe('a');
   });
 });
+
+it('uses the Shorts analysis range in the project workflow',async()=>{
+  const mock=vi.fn(async (input:RequestInfo|URL)=>String(input).endsWith('/transcription')?response({},404):response([]));
+  vi.stubGlobal('fetch',mock);
+  render(<AnalysisPanel videoId="v1" hasAudio projectId={1}/>);
+  expect((screen.getByLabelText('Clip duration') as HTMLSelectElement).value).toBe('20-45');
+});

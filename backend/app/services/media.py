@@ -1,5 +1,6 @@
 """Safe storage, YouTube URL handling, and local video probing."""
 import json
+import math
 import os
 import re
 import shutil
@@ -107,13 +108,19 @@ def probe_video(path: Path) -> dict:
         duration = float(info.get('format', {}).get('duration') or video.get('duration') or 0) or None
     except (TypeError, ValueError):
         duration = None
+    def stream_duration(stream):
+        try:
+            value=float((stream or {}).get('duration'))
+            return value if math.isfinite(value) and value>0 else None
+        except (TypeError,ValueError): return None
     # FFmpeg and OpenCV apply the display matrix by default; expose display dimensions.
     rotation = next((item.get('rotation') for item in video.get('side_data_list', []) if item.get('rotation') is not None), 0)
     try: rotated = abs(int(rotation)) % 180 == 90
     except (TypeError, ValueError): rotated = False
     width, height = (video['height'], video['width']) if rotated else (video['width'], video['height'])
-    return {'duration': duration, 'width': width, 'height': height,
+    return {'duration': duration, 'video_duration':stream_duration(video), 'audio_duration':stream_duration(audio), 'width': width, 'height': height,
             'frame_rate': video.get('avg_frame_rate') or video.get('r_frame_rate'),
+            'nominal_frame_rate': video.get('r_frame_rate'),
             'video_codec': video.get('codec_name'), 'audio_codec': audio.get('codec_name') if audio else None,
             'has_audio': bool(audio), 'size_bytes': path.stat().st_size}
 

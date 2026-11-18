@@ -15,6 +15,12 @@ YUNET_SHA256 = '8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
 @dataclass
 class ReframeOptions:
     aspect: float = 9 / 16
+    layout: str = 'follow'
+    letterbox_bg: str = '#000000'
+    letterbox_vertical_bias: float = .02
+    letterbox_edge: bool = False
+    fit_vertical_bias: float = -.05
+    sharpen: float = .35
     zoom: float = 1.0
     sample_fps: float = 6.0
     dead_zone: float = .12
@@ -40,6 +46,18 @@ class Sample:
     source: str = 'none'
     faces: list = field(default_factory=list)
     speaker_id: int | None = None
+
+
+def letterbox_rect(src_w, src_h, out_w=1080, out_h=1920, bias=.02):
+    """Fit the entire image with even dimensions and chroma-aligned placement."""
+    if any(not isinstance(n,(int,float)) or not math.isfinite(n) or n<=0 for n in (src_w,src_h,out_w,out_h)) or not math.isfinite(bias) or not -.15<=bias<=.15:
+        raise ValueError('Invalid letterbox dimensions or vertical bias.')
+    if out_w%2 or out_h%2: raise ValueError('Letterbox canvas dimensions must be even.')
+    scale=min(out_w/src_w,out_h/src_h)
+    fw=min(out_w,max(2,round(src_w*scale/2)*2)); fh=min(out_h,max(2,round(src_h*scale/2)*2))
+    x=max(0,min(out_w-fw,round((out_w-fw)/4)*2))
+    y=max(0,min(out_h-fh,round(((out_h-fh)/2+bias*out_h)/2)*2))
+    return {'x':int(x),'y':int(y),'w':int(fw),'h':int(fh)}
 
 
 def _yunet_path(models_dir: Path, allow_download: bool) -> Path | None:
@@ -253,6 +271,46 @@ def choose_speaker(samples, speech, opts, crop_width):
     return switches
 
 
+def prominent_tracks(samples, duration, min_visibility=.6):
+    """Rank distinct tracks by visible face-area-time and require persistence."""
+    stats = {}
+    if not samples or duration <= 0: return []
+    for i, sample in enumerate(samples):
+        dt = min(1., max(0., (samples[i+1].t-sample.t) if i+1 < len(samples) else duration/len(samples)))
+        for x,y,w,h,conf,tid,activity in sample.faces:
+            if tid is None: continue
+            state = stats.setdefault(tid, {'visible': 0., 'area': 0., 'x': 0.})
+            state['visible'] += dt; state['area'] += w*h*dt; state['x'] += (x+w/2)*dt
+    ranked = sorted(stats.items(), key=lambda item: item[1]['area'], reverse=True)[:2]
+    if len(ranked) < 2 or any(data['visible'] / duration < min_visibility for _,data in ranked): return []
+    return sorted(ranked, key=lambda item: item[1]['x']/item[1]['visible'])
+
+
+def panel_paths(samples, tracks, width, height, fps, opts, frame_count):
+    from dataclasses import replace
+    panel_opts=replace(opts, aspect=9/8)
+    output=[]
+    for tid,_ in tracks:
+        selected=[]
+        for sample in samples:
+            face=next((f for f in sample.faces if f[5]==tid), None)
+            if face:
+                x,y,w,h,*_=face
+                selected.append(Sample(sample.t,x+w/2,y+h/2,w,sample.cut,'face'))
+            else: selected.append(Sample(sample.t,cut=sample.cut))
+        cw,ch,path=build_camera_path(selected,width,height,fps,panel_opts,frame_count)
+        if not path: raise ValueError('Could not construct a stacked face track.')
+        stride=max(1,(len(path)+89)//90)
+        indices=set(range(0,len(path),stride))|{len(path)-1}
+        for sample in samples:
+            if sample.cut:
+                idx=min(len(path)-1,max(0,round((sample.t-samples[0].t)*fps)))
+                indices.update((idx,max(0,idx-1)))
+        output.append({'crop_w':int(cw)//2*2,'crop_h':int(ch)//2*2,
+                       'points':[{'t':round(path[i][0]-samples[0].t,3), 'x':round(path[i][1],2), 'y':round(path[i][2],2)} for i in sorted(indices)]})
+    return output
+
+
 def _median(values,k=5):
     half=k//2
     return [float(np.median(values[max(0,i-half):i+half+1])) for i in range(len(values))]
@@ -288,8 +346,7 @@ def _fill_gaps(samples,opts,default_x,default_y):
 
 
 def build_camera_path(samples,src_w,src_h,fps,opts,n_frames=None):
-    crop_h=src_h/opts.zoom; crop_w=crop_h*opts.aspect
-    if crop_w>src_w: crop_w=src_w; crop_h=crop_w/opts.aspect
+    crop_w=min(src_w,src_h*opts.aspect)/opts.zoom; crop_h=crop_w/opts.aspect
     if not samples: return crop_w,crop_h,[]
     xs,ys,_=_fill_gaps(samples,opts,src_w/2,src_h/2)
     scenes=[]; current=[]

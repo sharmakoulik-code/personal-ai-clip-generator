@@ -67,3 +67,112 @@ describe('subject framing and captions', () => {
     expect(JSON.parse(String(sent[1].body))).toMatchObject({tracking_engine:'subject',smooth_time:1,active_speaker:true,captions:true,caption_uppercase:true});
   });
 });
+
+describe('Shorts layout options', () => {
+  it('defaults to auto and submits the optional stack control', async () => {
+    const fetcher=vi.fn(async (path: RequestInfo | URL) => response(String(path).startsWith('/api/renders?') ? [] : {id:'new'},202));
+    vi.stubGlobal('fetch',fetcher);
+    const user=userEvent.setup();
+    render(<RenderPanel videoId="v1" projectId={1} clips={clips} />);
+    expect((screen.getByLabelText('Layout') as HTMLSelectElement).value).toBe('auto');
+    await user.click(screen.getByLabelText('Stack two speakers when possible'));
+    await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/clips/c1/render',expect.objectContaining({body:expect.stringContaining('"stack_two_speakers":true')})));
+  });
+});
+
+it('exposes the caption override and render-specific subtitle links', async () => {
+  const rows=[{id:'r1',clip_id:'c1',batch_id:'b1',project_id:1,video_id:'v1',clip_title:'First',status:'completed',stage:'done',progress:100,error:null,tracking_status:null,width:1080,height:1920,settings:{preset:'shorts'}}];
+  const fetcher=vi.fn(async (path: RequestInfo | URL) => response(String(path).startsWith('/api/renders?') ? rows : {id:'new'},202));
+  vi.stubGlobal('fetch',fetcher);
+  const user=userEvent.setup();
+  render(<RenderPanel videoId="v1" projectId={1} clips={clips} />);
+  expect((await screen.findByRole('link',{name:'Download SRT'})).getAttribute('href')).toBe('/api/clips/c1/captions.srt?render_id=r1');
+  expect(screen.getByRole('link',{name:'Download VTT'}).getAttribute('href')).toBe('/api/clips/c1/captions.vtt?render_id=r1');
+  await user.click(screen.getByLabelText('Burn in captions'));
+  await user.click(screen.getByLabelText('Add captions anyway'));
+  await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/clips/c1/render',expect.objectContaining({body:expect.stringContaining('"force_captions":true')})));
+});
+
+describe('Shorts workflow', () => {
+  it('applies preset defaults, displays warnings, and submits the override', async () => {
+    const rows: unknown[]=[];
+    const fetcher=vi.fn(async (path:RequestInfo|URL)=>{
+      const url=String(path);
+      if(url.endsWith('/preflight'))return response({warnings:[{code:'possible_burned_in_captions',severity:'warn',message:'Possible captions detected.'},{code:'too_short',severity:'info',message:'Source is short.'}]});
+      if(url.startsWith('/api/renders?'))return response(rows);
+      return response({id:'new'},202);
+    });
+    vi.stubGlobal('fetch',fetcher);
+    const user=userEvent.setup();
+    render(<RenderPanel shortsMode videoId="v1" projectId={1} clips={clips}/>);
+    expect((screen.getByLabelText('YouTube Shorts preset') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText('Burn in captions') as HTMLInputElement).checked).toBe(true);
+    expect(await screen.findByText(/Possible captions detected/)).toBeTruthy();
+    expect(screen.getByText(/Source is short/)).toBeTruthy();
+    await user.click(screen.getByLabelText('Add captions anyway'));
+    await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+    const sent=fetcher.mock.calls.find(call=>String(call[0])==='/api/clips/c1/render') as unknown as [unknown,RequestInit];
+    expect(JSON.parse(String(sent[1].body))).toMatchObject({preset:'shorts',layout:'auto',captions:true,caption_safe_zone:true,tighten:true,loudness_lufs:-14,force_captions:true});
+  });
+  it('generates metadata and shows a session notice once',async()=>{
+    sessionStorage.clear();
+    const rows=[{id:'r1',clip_id:'c1',batch_id:'b',project_id:1,video_id:'v1',clip_title:'First',status:'completed',stage:'done',progress:100,error:null,tracking_status:null,width:1080,height:1920,settings:{preset:'shorts'},info:{duration:30,layout_used:'follow',removed_seconds:1,loudness:{before:-20,after:-14}}}];
+    const fetcher=vi.fn(async (path:RequestInfo|URL,init?:RequestInit)=>{
+      const url=String(path);
+      if(url.startsWith('/api/renders?'))return response(rows);
+      if(url.endsWith('/metadata') && init?.method==='POST')return response({titles:['A title'],description:'Description',hashtags:['#test'],provider:'basic (no AI)'});
+      if(url.endsWith('/metadata'))return response({},404);
+      return response({});
+    });
+    vi.stubGlobal('fetch',fetcher);
+    const user=userEvent.setup();
+    render(<RenderPanel shortsMode videoId="v1" projectId={1} clips={clips}/>);
+    await user.click(await screen.findByRole('button',{name:'Generate metadata'}));
+    expect(await screen.findByText(/Provider: basic/)).toBeTruthy();
+    expect(screen.getByRole('button',{name:'Copy title 1'})).toBeTruthy();
+    const link=screen.getByRole('link',{name:'Download MP4'}); link.addEventListener('click',e=>e.preventDefault());
+    await user.click(link);
+    expect(screen.getByText(/If your video contains music or footage/)).toBeTruthy();
+    await user.click(screen.getByRole('button',{name:'Got it'}));
+    await user.click(link);
+    expect(screen.queryByText(/If your video contains music or footage/)).toBeNull();
+  });
+});
+
+it('blocks only captions when preflight reports no audio',async()=>{
+  const fetcher=vi.fn(async (path:RequestInfo|URL)=>{
+    const url=String(path);
+    if(url.endsWith('/preflight'))return response({warnings:[{code:'no_audio',severity:'block',message:'No audio stream.'}]});
+    if(url.startsWith('/api/renders?'))return response([]);
+    return response({});
+  });
+  vi.stubGlobal('fetch',fetcher);
+  render(<RenderPanel shortsMode videoId="v1" projectId={1} clips={clips}/>);
+  expect(await screen.findByText(/No audio stream/)).toBeTruthy();
+  expect((screen.getByLabelText('Burn in captions') as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByRole('button',{name:'Render selected clip'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('configures cinematic bars and validates colour before submitting',async()=>{
+  const fetcher=vi.fn(async(path:RequestInfo|URL)=>response(String(path).startsWith('/api/renders?')?[]:{id:'new'},202));
+  vi.stubGlobal('fetch',fetcher);
+  const user=userEvent.setup();
+  render(<RenderPanel videoId="v1" projectId={1} clips={clips}/>);
+  expect(screen.getByRole('option',{name:'Cinematic bars'})).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText('Layout'),'letterbox');
+  expect(screen.getByLabelText('Cinematic bars schematic')).toBeTruthy();
+  expect((screen.getByLabelText('Caption position') as HTMLSelectElement).value).toBe('on_video');
+  const colour=screen.getByLabelText('Background colour');
+  await user.clear(colour); await user.type(colour,'red');
+  expect(screen.getByRole('alert').textContent).toContain('six-digit hex');
+  expect((screen.getByRole('button',{name:'Render selected clip'}) as HTMLButtonElement).disabled).toBe(true);
+  await user.clear(colour); await user.type(colour,'#1a2B3c');
+  fireEvent.change(screen.getByLabelText('Vertical position'),{target:{value:'.1'}});
+  await user.click(screen.getByLabelText('Soft video edge'));
+  await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+  await waitFor(()=>expect(fetcher).toHaveBeenCalledWith('/api/clips/c1/render',expect.objectContaining({method:'POST'})));
+  const call=fetcher.mock.calls.find(c=>String(c[0])==='/api/clips/c1/render') as unknown as [unknown,RequestInit];
+  expect(JSON.parse(String(call[1].body))).toMatchObject({layout:'letterbox',letterbox_bg:'#1a2B3c',letterbox_vertical_bias:.1,letterbox_edge:true,caption_position:'on_video'});
+});

@@ -271,6 +271,9 @@ def run_job(job: dict) -> None:
             clips = llm_selection.select(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']), lambda name, i, n: update(job['id'], stage=f'Asking {name} to pick clips (window {i} of {n})'))
         else:
             clips = clip_selection.generate_candidates(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']))
+        if clips:
+            all_words=[w for segment in segments for w in (segment.get('words') or [])]
+            clips=clip_selection.score_tail_audio(video['path'], clips, all_words, lambda: check_cancel(job['id']))
         if job['cloud_titles'] and clips:
             clips, _provider = cloud_enhance(job['id'], clips)
         if job['groq_titles'] and clips:
