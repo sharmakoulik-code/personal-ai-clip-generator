@@ -42,3 +42,28 @@ describe('vertical rendering', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/renders/r2/cancel', {method:'POST'});
   });
 });
+
+describe('subject framing and captions', () => {
+  it('submits subject, speaker and caption options and shows failure and SRT download', async () => {
+    const rows = [
+      {id:'ok',clip_id:'c1',batch_id:'b1',project_id:1,video_id:'v1',clip_title:'First',status:'completed',stage:'Render completed',progress:100,error:null,tracking_status:'haar_face_framing',width:720,height:1280},
+      {id:'bad',clip_id:'c2',batch_id:'b1',project_id:1,video_id:'v1',clip_title:'Second',status:'failed',stage:'Failed',progress:20,error:'No timed transcript words',tracking_status:null,width:720,height:1280},
+    ];
+    const fetcher=vi.fn(async (path: RequestInfo | URL) => response(String(path).startsWith('/api/renders?') ? rows : {id:'new'},202));
+    vi.stubGlobal('fetch',fetcher);
+    const user=userEvent.setup();
+    render(<RenderPanel videoId="v1" projectId={1} clips={clips} initialClipId="c2" />);
+    expect(await screen.findByText(/No timed transcript words/)).toBeTruthy();
+    expect(screen.getByRole('link',{name:'Download SRT'}).getAttribute('href')).toBe('/api/clips/c1/captions.srt');
+    await user.selectOptions(screen.getByLabelText('Tracking engine'),'subject');
+    expect((screen.getByLabelText('Follow active speaker (heuristic)') as HTMLInputElement).checked).toBe(true);
+    fireEvent.change(screen.getByLabelText('Camera smoothness'),{target:{value:'1'}});
+    await user.click(screen.getByLabelText('Burn in captions'));
+    await user.selectOptions(screen.getByLabelText('Caption style'),'classic');
+    await user.click(screen.getByLabelText('Uppercase captions'));
+    await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/clips/c2/render',expect.objectContaining({body:expect.stringContaining('"caption_style":"classic"')})));
+    const sent=fetcher.mock.calls.find(call => String(call[0])==='/api/clips/c2/render') as unknown as [unknown, RequestInit];
+    expect(JSON.parse(String(sent[1].body))).toMatchObject({tracking_engine:'subject',smooth_time:1,active_speaker:true,captions:true,caption_uppercase:true});
+  });
+});

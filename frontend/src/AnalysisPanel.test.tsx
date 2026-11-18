@@ -101,3 +101,29 @@ describe('AI analysis', () => {
     expect((screen.getByRole('button', { name: 'Analyze Video with AI' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe('AI-picked clip selection', () => {
+  it('submits the opt-in mode, explains privacy, and shows AI score breakdown', async () => {
+    const clip = {...makeClip('a','AI pick',90,0,20), reason:'Groq selection (review): Interesting.', scores:{llm_hook:80,llm_payoff:90}};
+    const fetcher=vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path=String(input);
+      if (path.endsWith('/analyze') && init?.method==='POST') return response({id:'j'},202);
+      if (path.endsWith('/analysis-jobs')) return response([{id:'j',status:'completed',stage:'Analysis completed',progress:100,error:null}]);
+      if (path.endsWith('/transcription')) return response({model:'base',language:'en',segments:[]});
+      if (path.endsWith('/clips')) return response([clip]);
+      return response([]);
+    });
+    vi.stubGlobal('fetch',fetcher);
+    const user=userEvent.setup();
+    render(<AnalysisPanel videoId="v1" hasAudio projectId={1} />);
+    expect(await screen.findByText('Suggested clips (1)')).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText('Clip selection'),'llm');
+    expect(screen.getByText(/numbered transcript excerpts and timings/)).toBeTruthy();
+    await user.click(screen.getByRole('button',{name:'Run analysis again'}));
+    expect(fetcher).toHaveBeenCalledWith('/api/videos/v1/analyze',expect.objectContaining({body:expect.stringContaining('"selection_mode":"llm"')}));
+    await user.click(screen.getByText('View clip transcript and scores'));
+    expect(screen.getByText('llm hook: 80/100')).toBeTruthy();
+    await user.click(screen.getByRole('button',{name:'Render vertical clip'}));
+    expect((screen.getByLabelText('Clip to preview') as HTMLSelectElement).value).toBe('a');
+  });
+});

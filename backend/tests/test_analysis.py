@@ -561,3 +561,45 @@ def test_cloud_network_and_invalid_response_categories(configured, monkeypatch):
     assert 'Groq: connection or timeout error' in failed['error']
     assert 'Google Gemini: invalid, truncated or blocked response' in failed['error']
     assert 'secret' not in str(failed)
+
+
+def test_llm_selection_success_failure_preserves_existing(configured, monkeypatch):
+    import json, httpx
+    from app.services import llm_selection
+    client,_=configured
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.delenv('GEMINI_API_KEY',raising=False)
+    assert client.post('/api/videos/vid/analyze',json={'selection_mode':'llm'}).status_code==409
+    assert client.post('/api/videos/vid/analyze',json={'selection_mode':'invalid'}).status_code==422
+    monkeypatch.setattr(analysis,'transcribe',lambda *a:('en',fake_segments()))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json(); assert wait_job(client,job['id'])['status']=='completed'
+    old=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    monkeypatch.setenv('GROQ_API_KEY','fake-groq'); monkeypatch.setenv('GEMINI_API_KEY','fake-gemini')
+    monkeypatch.setattr(llm_selection.httpx,'post',lambda *a,**k:httpx.Response(403,text='secret response'))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm'}).json()
+    failed=wait_job(client,job['id']); assert failed['status']=='failed' and 'Groq' in failed['error'] and 'Google Gemini' in failed['error']
+    assert 'secret' not in str(failed) and client.get('/api/videos/vid/clips').json()==old
+    item={'start_index':0,'end_index':1,'title':'Selected','hook_reason':'Why','reason':'Because','scores':{'hook':80,'self_contained':70,'payoff':60,'emotion':50,'novelty':40}}
+    body={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[item]})}}]}
+    monkeypatch.setattr(llm_selection.httpx,'post',lambda *a,**k:httpx.Response(200,json=body))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm','groq_titles':True,'gemini_titles':True}).json()
+    done=wait_job(client,job['id']); assert done['status']=='completed' and done['selection_mode']=='llm'
+    clips=client.get('/api/videos/vid/clips').json(); assert clips[0]['title']=='Selected' and clips[0]['scores']['llm_hook']==80
+
+
+def test_llm_selection_cancellation_keeps_previous_clips(configured, monkeypatch):
+    from app.services import llm_selection
+    client,_=configured
+    monkeypatch.setattr(analysis,'transcribe',lambda *a:('en',fake_segments()))
+    first=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json()
+    assert wait_job(client,first['id'])['status']=='completed'
+    old=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    monkeypatch.setenv('GROQ_API_KEY','fake-key')
+    entered=threading.Event(); release=threading.Event()
+    def blocked(provider,items,minimum,maximum,check):
+        entered.set(); release.wait(3); check(); return []
+    monkeypatch.setattr(llm_selection,'_request',blocked)
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm'}).json()
+    assert entered.wait(3)
+    client.post('/api/analysis/jobs/'+job['id']+'/cancel'); release.set()
+    assert wait_job(client,job['id'])['status']=='cancelled'
+    assert client.get('/api/videos/vid/clips').json()==old

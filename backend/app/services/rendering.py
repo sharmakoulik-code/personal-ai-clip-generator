@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from .. import database
-from . import framing, ingestion, media
+from . import analysis, captions, framing, ingestion, media, reframe
 
 log = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -28,7 +28,7 @@ def get(render_id):
 
 def public(row):
     if not row: return None
-    return {k: v for k, v in row.items() if k not in ('path', 'thumbnail_path', 'settings_json', 'cancel_requested')} | {'settings': json.loads(row['settings_json'])}
+    return {k: v for k, v in row.items() if k not in ('path', 'thumbnail_path', 'settings_json', 'cancel_requested', 'info_json')} | {'settings': json.loads(row['settings_json']), 'info': json.loads(row.get('info_json') or 'null')}
 
 
 def list_renders(video_id=None, project_id=None):
@@ -52,8 +52,11 @@ def queue_clips(clip_ids, settings):
             if db.execute("SELECT 1 FROM renders WHERE clip_id=? AND status IN ('pending','running')", (clip_id,)).fetchone(): raise ValueError('A render is already active for this clip.')
             rid = uuid.uuid4().hex; ids.append(rid)
             height = settings['resolution']; width = height * 9 // 16
+            pad = settings.get('pad', 0)
+            clip_start = max(0, c['start'] - pad)
+            clip_end = min(c['duration'], c['end'] + pad)
             db.execute('''INSERT INTO renders(id,batch_id,project_id,video_id,clip_id,clip_title,start,end,layout,width,height,settings_json,status,stage)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending','Queued')''', (rid,batch,c['project_id'],c['video_id'],clip_id,c['title'],c['start'],c['end'],settings['layout'],width,height,json.dumps(settings)))
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending','Queued')''', (rid,batch,c['project_id'],c['video_id'],clip_id,c['title'],clip_start,clip_end,settings['layout'],width,height,json.dumps(settings)))
     return [public(get(i)) for i in ids]
 
 
@@ -83,18 +86,56 @@ def source_video(video_id):
     return video, path
 
 
-def track(video, path, start, end, settings, check, progress):
+def track(video, path, start, end, settings, check, progress, with_info=False):
     if settings['layout'] != 'smart' or not settings['track_faces']:
-        return [{'t': 0, 'x': .5, 'y': .5}], 'center'
-    key = hashlib.sha256(json.dumps([video['id'], path.stat().st_mtime_ns, path.stat().st_size, start, end, settings['detect_interval']], separators=(',', ':')).encode()).hexdigest()
+        result = ([{'t': 0, 'x': .5, 'y': .5}], 'center', {})
+        return result if with_info else result[:2]
+    engine = settings.get('tracking_engine', 'standard')
+    transcript = analysis.get_transcript(video['id']) if engine == 'subject' and settings.get('active_speaker') else None
+    words = [w for segment in (transcript or {}).get('segments', []) for w in segment.get('words', [])]
+    speech = [(a, b) for a, b in reframe.speech_intervals(words) if b > start and a < end]
+    model = media.storage_root() / 'models' / 'face_detection_yunet.onnx'
+    model_state = (model.stat().st_size, model.stat().st_mtime_ns) if engine == 'subject' and model.is_file() else None
+    key = hashlib.sha256(json.dumps([video['id'], path.stat().st_mtime_ns, path.stat().st_size, start, end, settings['detect_interval'], engine, settings.get('smooth_time'), settings.get('dead_zone'), settings.get('zoom'), settings.get('active_speaker'), speech, model_state], separators=(',', ':')).encode()).hexdigest()
     with database.connect() as db: cached = db.execute('SELECT data_json FROM face_track_cache WHERE key=?', (key,)).fetchone()
     if cached:
-        data = json.loads(cached['data_json']); return data['points'], data['status']
-    points, status = framing.detect_frames(path, start, end - start, settings['detect_interval'], check, progress)
+        data = json.loads(cached['data_json']); result = (data['points'], data['status'], data.get('info', {}))
+        return result if with_info else result[:2]
+    if engine == 'subject':
+        points, status, info = subject_track(path, start, end, settings, check, speech, with_info=True)
+        progress(1)
+    else:
+        points, status = framing.detect_frames(path, start, end - start, settings['detect_interval'], check, progress)
+        info = {}
     check()
     with database.connect() as db:
-        db.execute('INSERT OR REPLACE INTO face_track_cache(key,video_id,data_json) VALUES(?,?,?)', (key, video['id'], json.dumps({'points': points, 'status': status})))
-    return points, status
+        db.execute('INSERT OR REPLACE INTO face_track_cache(key,video_id,data_json) VALUES(?,?,?)', (key, video['id'], json.dumps({'points': points, 'status': status, 'info': info})))
+    result = (points, status, info)
+    return result if with_info else result[:2]
+
+
+def subject_track(path, start, end, settings, check, speech=None, with_info=False):
+    opts = reframe.ReframeOptions(zoom=settings.get('zoom', 1), smooth_time=settings.get('smooth_time', .55), dead_zone=settings.get('dead_zone', .12), active_speaker=settings.get('active_speaker', False))
+    detector = reframe.FaceDetector(media.storage_root() / 'models', allow_download=os.environ.get('CLIP_NO_MODEL_DOWNLOAD') != '1')
+    check()
+    samples, (w, h, fps) = reframe.analyze_subject(path, start, end, opts, detector, check, speech=speech)
+    cw, ch, camera = reframe.build_camera_path(samples, w, h, fps, opts, int(round((end-start)*fps)))
+    if not camera: raise ValueError('Could not read frames for subject tracking.')
+    # Preserve both sides of each detected hard cut; interpolate smoothly elsewhere.
+    stride = max(1, (len(camera)+89)//90)
+    indices = set(range(0, len(camera), stride)) | {len(camera)-1}
+    for sample in samples:
+        if sample.cut:
+            idx = min(len(camera)-1, max(0, round((sample.t-start)*fps)))
+            indices.update((idx, max(0,idx-1)))
+    chosen = [camera[i] for i in sorted(indices)]
+    points = [{'t':round(t-start, 3), 'x':round((x+cw/2)/w, 5), 'y':round((y+ch/2)/h, 5)} for t,x,y in chosen]
+    source = 'face' if any(s.faces for s in samples) else ('motion' if any(s.source == 'motion' for s in samples) else 'center')
+    ids = {f[5] for s in samples for f in s.faces if f[5] is not None}
+    chosen = [s.speaker_id for s in samples if s.speaker_id is not None]
+    info = {'detector': detector.kind, 'tracks': len(ids), 'speaker_switches': sum(a != b for a,b in zip(chosen,chosen[1:])), 'speaker_status': ('heuristic' if speech and opts.active_speaker else 'no_transcript' if opts.active_speaker else 'disabled')}
+    result = (points, f'{detector.kind}_{source}_framing', info)
+    return result if with_info else result[:2]
 
 
 def filter_graph(video, settings, points, width, height):
@@ -122,8 +163,8 @@ def preview(clip, settings):
     return result.stdout, status
 
 
-def run_ffmpeg(args, rid, duration):
-    try: proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+def run_ffmpeg(args, rid, duration, cwd=None):
+    try: proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, cwd=cwd)
     except OSError as exc: raise ValueError('FFmpeg could not start. Verify it is installed.') from exc
     lines = queue.Queue()
     def reader():
@@ -165,12 +206,39 @@ def run_job(job):
         details = media.probe_video(path)
         temp.mkdir(parents=True, exist_ok=True); target.parent.mkdir(parents=True, exist_ok=True)
         update(rid, 'Detecting faces', 0)
-        points, status = track(video, path, job['start'], job['end'], settings, lambda: check_cancel(rid), lambda p: update(rid, 'Detecting faces', p * 20))
+        points, status, info = track(video, path, job['start'], job['end'], settings, lambda: check_cancel(rid), lambda p: update(rid, 'Detecting faces', p * 20), with_info=True)
         check_cancel(rid); update(rid, 'Rendering video', 20)
         output = temp / 'output.mp4'; graph = filter_graph(details, settings, points, job['width'], job['height'])
         codec = encoder_args(settings['quality'])
-        args = [os.environ.get('CLIP_FFMPEG','ffmpeg'),'-hide_banner','-loglevel','error','-nostdin','-y','-ss',str(job['start']),'-protocol_whitelist','file,pipe','-i',str(path),'-t',str(job['end']-job['start']),'-filter_complex',graph,'-map','[v]','-map','0:a:0?',*codec,'-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart','-progress','pipe:1','-nostats',str(output)]
-        run_ffmpeg(args, rid, job['end']-job['start']); check_cancel(rid)
+        if settings.get('captions'):
+            transcript = analysis.get_transcript(job['video_id']) or {}
+            words = [w for segment in transcript.get('segments', []) for w in segment.get('words', [])]
+            content = captions.build_ass(words, job['start'], job['end'], job['width'], job['height'], settings.get('caption_style', 'highlight'), settings.get('caption_uppercase', False))
+            (temp / 'captions.ass').write_text(content, encoding='utf-8')
+            font_option = ''
+            fonts = os.environ.get('CLIP_CAPTION_FONTS_DIR')
+            if fonts:
+                font_dir = Path(fonts).expanduser().resolve()
+                if not font_dir.is_dir(): raise ValueError('Caption font directory does not exist.')
+                files = [p for p in font_dir.iterdir() if p.is_file() and not p.is_symlink() and p.suffix.lower() in ('.ttf','.otf')]
+                if len(files)>100 or sum(p.stat().st_size for p in files)>100_000_000: raise ValueError('Caption font directory is too large.')
+                local_fonts = temp / 'fonts'; local_fonts.mkdir()
+                for font in files: shutil.copy2(font, local_fonts / font.name)
+                font_option = ':fontsdir=fonts'
+            graph = graph.removesuffix('[v]') + '[base];[base]ass=filename=captions.ass' + font_option + '[v]'
+        graph_path = temp / 'filter.ffscript'
+        graph_path.write_text(graph, encoding='utf-8')
+        args = [os.environ.get('CLIP_FFMPEG','ffmpeg'),'-hide_banner','-loglevel','error','-nostdin','-y','-ss',str(job['start']),'-protocol_whitelist','file,pipe','-i',str(path),'-t',str(job['end']-job['start']),'-filter_complex_script',str(graph_path),'-map','[v]','-map','0:a:0?',*codec,'-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart','-progress','pipe:1','-nostats',str(output)]
+        if settings.get('normalize_audio') and video['has_audio']:
+            args[-1:-1] = ['-af', 'loudnorm=I=-16:TP=-1.5:LRA=11']
+        if settings.get('captions'):
+            executable = shutil.which(args[0])
+            if not executable: raise ValueError('FFmpeg could not start. Verify it is installed.')
+            args[0] = str(Path(executable).resolve())
+            run_ffmpeg(args, rid, job['end']-job['start'], cwd=temp)
+        else:
+            run_ffmpeg(args, rid, job['end']-job['start'])
+        check_cancel(rid)
         probe = media.probe_video(output)
         if (probe['width'] != job['width'] or probe['height'] != job['height']
                 or probe['video_codec'] != 'h264' or (video['has_audio'] and probe['audio_codec'] != 'aac')
@@ -185,7 +253,7 @@ def run_job(job):
             if not current or current['cancel_requested'] or _stop.is_set(): raise Cancelled()
             output.replace(target)
             if has_thumb: temporary_thumb.replace(thumb)
-            db.execute("UPDATE renders SET status='completed',stage='Render completed',progress=100,path=?,thumbnail_path=?,tracking_status=?,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (str(target), str(thumb) if has_thumb else None, status, rid))
+            db.execute("UPDATE renders SET status='completed',stage='Render completed',progress=100,path=?,thumbnail_path=?,tracking_status=?,info_json=?,completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (str(target), str(thumb) if has_thumb else None, status, json.dumps(info), rid))
     except Cancelled:
         target.unlink(missing_ok=True); thumb.unlink(missing_ok=True)
         with database.connect() as db: db.execute("UPDATE renders SET status='cancelled',stage='Cancelled',error='Render cancelled or interrupted.',completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (rid,))

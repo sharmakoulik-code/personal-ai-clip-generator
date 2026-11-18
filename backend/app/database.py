@@ -105,6 +105,9 @@ def initialize() -> None:
             if name not in columns:
                 connection.execute(f'ALTER TABLE analysis_jobs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
 
+        if 'selection_mode' not in columns:
+            connection.execute("ALTER TABLE analysis_jobs ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'local'")
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS renders (
                 id TEXT PRIMARY KEY, batch_id TEXT NOT NULL,
@@ -120,6 +123,9 @@ def initialize() -> None:
                 completed_at TEXT
             )
         """)
+        render_columns = {row['name'] for row in connection.execute('PRAGMA table_info(renders)')}
+        if 'info_json' not in render_columns:
+            connection.execute('ALTER TABLE renders ADD COLUMN info_json TEXT')
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_render_per_clip ON renders(clip_id) WHERE status IN ('pending','running')")
         connection.execute("""
             CREATE TABLE IF NOT EXISTS face_track_cache (

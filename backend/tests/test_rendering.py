@@ -285,3 +285,55 @@ def test_deleting_video_removes_completed_output_and_cache(app_with_video):
     assert client.delete('/api/videos/'+vid).status_code==204
     assert not path.exists() and client.get('/api/renders/'+job['id']).status_code==404
     with database.connect() as db: assert not db.execute('select count(*) from face_track_cache where video_id=?',(vid,)).fetchone()[0]
+
+
+def test_subject_render_request_validation(app_with_video):
+    client, project, vid, tmp = app_with_video
+    assert client.post('/api/clips/missing/render', json={'tracking_engine':'subject'}).status_code == 404
+    assert client.post('/api/clips/clip1/render', json={'tracking_engine':'subject','zoom':5}).status_code == 422
+    assert client.get('/api/renders/missing').status_code == 404
+    job=client.post('/api/clips/clip1/render', json={'tracking_engine':'subject','layout':'smart','resolution':1280,'quality':'small'}).json()
+    result=wait(client,job['id'])
+    assert result['status']=='completed' and result['tracking_status'].startswith('haar_'), result
+
+
+def test_caption_srt_and_real_burn_in(app_with_video):
+    import json
+    client, project, vid, tmp = app_with_video
+    with database.connect() as db:
+        db.execute("INSERT INTO transcripts(video_id,model,language,duration) VALUES(?,?,?,?)",(vid,'base','en',2))
+        words=[{'start':.1,'end':.5,'word':'hello'},{'start':.6,'end':1.2,'word':'world'}]
+        db.execute("INSERT INTO transcript_segments(video_id,position,start,end,text,words_json) VALUES(?,?,?,?,?,?)",(vid,0,.1,1.2,'hello world',json.dumps(words)))
+    srt=client.get('/api/clips/clip1/captions.srt')
+    assert srt.status_code == 200 and '00:00:00,100' in srt.text and 'hello world' in srt.text
+    ffmpeg=os.environ.get('CLIP_FFMPEG') or shutil.which('ffmpeg')
+    filters=subprocess.run([ffmpeg,'-hide_banner','-filters'],capture_output=True,text=True,check=True).stdout
+    if not any(' ass ' in line for line in filters.splitlines()): pytest.skip('FFmpeg libass filter unavailable')
+    response=client.post('/api/clips/clip1/render',json={'layout':'center','resolution':1280,'quality':'small','captions':True,'caption_style':'highlight'})
+    job=wait(client,response.json()['id']); assert job['status']=='completed',job
+    out=tmp/'caption.mp4'; out.write_bytes(client.get(f"/api/renders/{job['id']}/download").content)
+    assert media.probe_video(out)['video_codec']=='h264'
+
+
+def test_missing_caption_words_fails_explicitly(app_with_video):
+    client, _, _, _=app_with_video
+    assert client.get('/api/clips/clip1/captions.srt').status_code==422
+    job=client.post('/api/clips/clip1/render',json={'layout':'center','resolution':1280,'captions':True}).json()
+    done=wait(client,job['id']); assert done['status']=='failed' and 'No timed transcript words' in done['error']
+
+
+def test_padding_and_loudness_are_opt_in(app_with_video):
+    client, project, vid, tmp = app_with_video
+    job=client.post('/api/clips/clip2/render',json={'layout':'center','resolution':1280,'quality':'small','pad':.2,'normalize_audio':True}).json()
+    assert abs(job['start']-.3)<.001 and abs(job['end']-2)<.001
+    result=wait(client,job['id']); assert result['status']=='completed',result
+    out=tmp/'normalized.mp4'; out.write_bytes(client.get(f"/api/renders/{job['id']}/download").content)
+    assert abs(media.probe_video(out)['duration']-1.7)<.35
+
+
+def test_active_speaker_reports_missing_transcript(app_with_video, monkeypatch):
+    monkeypatch.setenv('CLIP_NO_MODEL_DOWNLOAD','1')
+    client, _, _, _=app_with_video
+    job=client.post('/api/clips/clip1/render',json={'layout':'smart','tracking_engine':'subject','active_speaker':True,'resolution':1280,'quality':'small'}).json()
+    result=wait(client,job['id']); assert result['status']=='completed',result
+    assert result['info']['speaker_status']=='no_transcript'

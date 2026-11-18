@@ -28,7 +28,7 @@ For optional real inference testing, set `CLIP_TEST_MODEL_DIR` to a converted Ba
 
 ## Phase 4 rendering API
 
-`opencv-python-headless` provides the bundled CPU Haar detector; FFmpeg/FFprobe must be on PATH and the FFmpeg build must support libx264 and AAC. Optional `CLIP_RENDER_ENCODER=nvenc` requests NVIDIA H.264 encoding without automatic fallback; default is `cpu`. This encoder and Phase 4 on Windows have not been validated. The detector only frames visible faces and cannot identify an active speaker.
+`opencv-python-headless` provides the bundled CPU Haar detector; FFmpeg/FFprobe must be on PATH and the FFmpeg build must support libx264 and AAC. Optional `CLIP_RENDER_ENCODER=nvenc` requests NVIDIA H.264 encoding without automatic fallback; default is `cpu`. This encoder and Phase 4 on Windows have not been validated. The standard detector only frames visible faces; the optional mouth-motion heuristic is not reliable speaker identification.
 
 - `GET /api/videos/{id}/stream`: local source with HTTP range support.
 - `GET /api/clips/{id}/render-preview`: representative JPEG at clip start, with `X-Framing-Status`; settings are query parameters.
@@ -37,3 +37,12 @@ For optional real inference testing, set `CLIP_TEST_MODEL_DIR` to a converted Ba
 - `POST /api/renders/{id}/cancel`, `POST /api/renders/{id}/retry`, `DELETE /api/renders/{id}`; `GET /api/renders/{id}/stream` and `/download` for completed jobs.
 
 The `renders` table snapshots clip ranges/settings and tracks progress and output paths; `face_track_cache` stores sampled crop centers. A partial unique index blocks two active renders for a clip. A single worker processes jobs, uses bounded-frame sampling and FFmpeg, validates output and moves it into local rendered storage. The first audio stream is retained if present. Pending work resumes after restart; interrupted jobs are marked failed, and cancelled/failed jobs can be retried if their source clip still exists. Video/project deletion and re-analysis are blocked by active renders. Source files and outputs are restricted to local storage paths. See root README for operational and Windows test instructions and limitations.
+
+The smart layout additionally accepts `tracking_engine: "subject"`, `smooth_time` (.15–2 seconds), and `dead_zone` (0–.5); `standard` remains the default for existing clients. Subject mode samples faces and motion, builds a smoothed camera path, and reports the detector used in `tracking_status`. YuNet downloads on first subject render unless `CLIP_NO_MODEL_DOWNLOAD=1`; a SHA-256 verified model is cached under storage/models. If unavailable or unsupported, Haar is used and reported. This is visual framing, not speaker identification.
+
+Subject tracking can opt into `active_speaker: true`. It merges existing word timings to locate speech, then heuristically compares mouth motion across associated faces with a switch delay and group framing. It reports `info.tracks`, `info.speaker_switches`, and `info.speaker_status`; without transcript words it reports `no_transcript` and uses visual tracking. This cannot reliably identify speakers in profile, at low resolution, with camera motion, overlapping voices or off-screen speech.
+
+
+For optional padded cuts use `pad` (0–1 seconds; default 0); `normalize_audio: true` requests loudness normalization and changes the original audio levels. For burn-in, request `captions: true` with `caption_style: highlight|classic|minimal` and optional `caption_uppercase`. FFmpeg needs the `ass` filter; optional `CLIP_CAPTION_FONT` and `CLIP_CAPTION_FONTS_DIR` select locally installed fonts. Captions are generated from stored word timings, never from a cloud model. A missing timed transcript is an error. `GET /api/clips/{id}/captions.srt` downloads relative-time subtitles without burning them into video.
+
+`POST /api/videos/{id}/analyze` accepts `selection_mode: local|llm` (default `local`). `llm` requires a Groq or Gemini environment key and supersedes title provider flags; bounded, overlapping numbered transcript excerpts and timings are sent to providers, never video. Provider responses suggest integer indices; the backend validates boundaries/durations, deduplicates, sanitizes text and blends local and AI scores. On total failure old clips/selections remain. Scores and titles are suggestions, not guarantees.

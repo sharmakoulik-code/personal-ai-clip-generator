@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from .. import database
-from ..services import ingestion, media, rendering
+from ..services import analysis, captions, ingestion, media, rendering
 
 router = APIRouter(prefix='/api')
 
@@ -22,6 +22,15 @@ class RenderSettings(BaseModel):
     zoom: float = Field(default=1, ge=1, le=2, allow_inf_nan=False)
     detect_interval: float = Field(default=1, ge=.5, le=5, allow_inf_nan=False)
     track_faces: bool = True
+    tracking_engine: Literal['standard', 'subject'] = 'standard'
+    active_speaker: bool = False
+    captions: bool = False
+    caption_style: Literal['highlight', 'classic', 'minimal'] = 'highlight'
+    caption_uppercase: bool = False
+    pad: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
+    normalize_audio: bool = False
+    smooth_time: float = Field(default=.55, ge=.15, le=2, allow_inf_nan=False)
+    dead_zone: float = Field(default=.12, ge=0, le=.5, allow_inf_nan=False)
     split_ratio: float = Field(default=.67, ge=.5, le=.8, allow_inf_nan=False)
 
 
@@ -56,6 +65,16 @@ def render_preview(clip_id: str, settings: RenderSettings = Depends()):
     try: image, status = rendering.preview(clip, settings.model_dump())
     except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     return Response(image, media_type='image/jpeg', headers={'X-Framing-Status': status, 'Cache-Control':'no-store'})
+
+
+@router.get('/clips/{clip_id}/captions.srt')
+def caption_srt(clip_id: str):
+    clip = clip_or_404(clip_id)
+    transcript = analysis.get_transcript(clip['video_id']) or {}
+    words = [word for segment in transcript.get('segments', []) for word in segment.get('words', [])]
+    try: content = captions.build_srt(words, clip['start'], clip['end'])
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    return Response(content, media_type='application/x-subrip; charset=utf-8', headers={'Content-Disposition':'attachment; filename="captions.srt"'})
 
 
 @router.post('/clips/{clip_id}/render', status_code=202)
