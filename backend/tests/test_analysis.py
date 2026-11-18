@@ -103,6 +103,8 @@ def test_analysis_save_selection_reuse_and_restart(configured, monkeypatch):
     assert wait_job(client, job['id'])['status'] == 'completed'
     all_clips = client.patch('/api/videos/vid/clips/selection', json={'selected': True}).json()
     analysis.stop_worker()
+    from app.services import rendering
+    rendering.stop_worker()
     with TestClient(app) as restarted:
         assert restarted.get('/api/videos/vid/clips').json() == all_clips
         assert restarted.get('/api/videos/vid/transcription').json()['segments'] == fake_segments()
@@ -501,3 +503,146 @@ def test_cloud_ai_does_not_fallback_after_cancellation(configured, monkeypatch):
     release.set()
     assert wait_job(client, job['id'])['status'] == 'cancelled'
     assert calls == ['groq']
+
+
+def test_cloud_reports_safe_provider_categories_and_preserves_results(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement, gemini_enhancement
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    first = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30'}).json()
+    assert wait_job(client, first['id'])['status'] == 'completed'
+    old = client.patch('/api/videos/vid/clips/selection', json={'selected': True}).json()
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-groq-key')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-gemini-key')
+    def fake_post(url, **kwargs):
+        return httpx.Response(429 if 'groq' in url else 403, text='private provider response')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fake_post)
+    job = client.post('/api/videos/vid/analyze', json={'duration_range': '15-30', 'cloud_titles': True}).json()
+    failed = wait_job(client, job['id'])
+    assert failed['status'] == 'failed'
+    assert 'Groq: rate or quota limit (HTTP 429)' in failed['error']
+    assert 'Google Gemini: key rejected or model access denied' in failed['error']
+    assert 'secret' not in str(failed) and 'private provider response' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json() == old
+
+
+@pytest.mark.parametrize('provider,status,category', [
+    ('groq', 401, 'auth'), ('groq', 404, 'unavailable'), ('groq', 429, 'quota'), ('groq', 500, 'http'),
+    ('gemini', 400, 'request'), ('gemini', 403, 'auth'), ('gemini', 404, 'unavailable'), ('gemini', 429, 'quota'), ('gemini', 500, 'http'),
+])
+def test_provider_error_categories_are_sanitized(provider, status, category, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement, gemini_enhancement
+    from app.services.provider_errors import ProviderError
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-key')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-key')
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', lambda *a, **k: httpx.Response(status, text='private response'))
+    service = groq_enhancement if provider == 'groq' else gemini_enhancement
+    with pytest.raises(ProviderError) as err:
+        service.enhance([{'id':'one', 'transcript':'text'}])
+    assert err.value.category == category
+    assert 'secret-key' not in str(err.value) and 'private response' not in str(err.value)
+
+
+def test_cloud_network_and_invalid_response_categories(configured, monkeypatch):
+    import httpx
+    from app.services import groq_enhancement
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    monkeypatch.setenv('GROQ_API_KEY', 'secret-groq')
+    monkeypatch.setenv('GEMINI_API_KEY', 'secret-gemini')
+    def fake_post(url, **kwargs):
+        if 'groq' in url: raise httpx.ConnectError('secret network details')
+        return httpx.Response(200, json={'candidates': [{'finishReason':'SAFETY'}]})
+    monkeypatch.setattr(groq_enhancement.httpx, 'post', fake_post)
+    job = client.post('/api/videos/vid/analyze', json={'duration_range':'15-30', 'cloud_titles':True}).json()
+    failed = wait_job(client, job['id'])
+    assert 'Groq: connection or timeout error' in failed['error']
+    assert 'Google Gemini: invalid, truncated or blocked response' in failed['error']
+    assert 'secret' not in str(failed)
+
+
+def test_llm_selection_success_failure_preserves_existing(configured, monkeypatch):
+    import json, httpx
+    from app.services import llm_selection
+    client,_=configured
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.delenv('GEMINI_API_KEY',raising=False)
+    assert client.post('/api/videos/vid/analyze',json={'selection_mode':'llm'}).status_code==409
+    assert client.post('/api/videos/vid/analyze',json={'selection_mode':'invalid'}).status_code==422
+    monkeypatch.setattr(analysis,'transcribe',lambda *a:('en',fake_segments()))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json(); assert wait_job(client,job['id'])['status']=='completed'
+    old=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    monkeypatch.setenv('GROQ_API_KEY','fake-groq'); monkeypatch.setenv('GEMINI_API_KEY','fake-gemini')
+    monkeypatch.setattr(llm_selection.httpx,'post',lambda *a,**k:httpx.Response(403,text='secret response'))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm'}).json()
+    failed=wait_job(client,job['id']); assert failed['status']=='failed' and 'Groq' in failed['error'] and 'Google Gemini' in failed['error']
+    assert 'secret' not in str(failed) and client.get('/api/videos/vid/clips').json()==old
+    item={'start_index':0,'end_index':1,'title':'Selected','hook_reason':'Why','reason':'Because','scores':{'hook':80,'self_contained':70,'payoff':60,'emotion':50,'novelty':40}}
+    body={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[item]})}}]}
+    monkeypatch.setattr(llm_selection.httpx,'post',lambda *a,**k:httpx.Response(200,json=body))
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm','groq_titles':True,'gemini_titles':True}).json()
+    done=wait_job(client,job['id']); assert done['status']=='completed' and done['selection_mode']=='llm'
+    clips=client.get('/api/videos/vid/clips').json(); assert clips[0]['title']=='Selected' and clips[0]['scores']['llm_hook']==80
+
+
+def test_llm_selection_cancellation_keeps_previous_clips(configured, monkeypatch):
+    from app.services import llm_selection
+    client,_=configured
+    monkeypatch.setattr(analysis,'transcribe',lambda *a:('en',fake_segments()))
+    first=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json()
+    assert wait_job(client,first['id'])['status']=='completed'
+    old=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    monkeypatch.setenv('GROQ_API_KEY','fake-key')
+    entered=threading.Event(); release=threading.Event()
+    def blocked(provider,items,minimum,maximum,check):
+        entered.set(); release.wait(3); check(); return []
+    monkeypatch.setattr(llm_selection,'_request',blocked)
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm'}).json()
+    assert entered.wait(3)
+    client.post('/api/analysis/jobs/'+job['id']+'/cancel'); release.set()
+    assert wait_job(client,job['id'])['status']=='cancelled'
+    assert client.get('/api/videos/vid/clips').json()==old
+
+
+@pytest.mark.parametrize('reason,expected', [
+    ('API_KEY_INVALID', 'google_invalid_key'),
+    ('API_KEY_SERVICE_BLOCKED', 'google_restricted_key'),
+    ('API_KEY_IP_ADDRESS_BLOCKED', 'google_restricted_key'),
+    ('SERVICE_DISABLED', 'google_service_disabled'),
+    ('unknown-secret-reason', 'request'),
+])
+def test_google_structured_error_categories_never_expose_details(monkeypatch, reason, expected):
+    import httpx
+    from app.services import gemini_enhancement, llm_selection
+    from app.services.provider_errors import ProviderError
+    monkeypatch.setenv('GEMINI_API_KEY', 'private-key')
+    body={'error': {'message':'private-key and provider details', 'details':[{'reason':reason,'metadata':{'token':'private-key'}}]}}
+    monkeypatch.setattr(gemini_enhancement.httpx, 'post', lambda *a, **k: httpx.Response(400, json=body))
+    with pytest.raises(ProviderError) as first:
+        gemini_enhancement.enhance([{'id':'one','transcript':'hello'}])
+    with pytest.raises(ProviderError) as second:
+        llm_selection._request('Google Gemini',[(0,{'start':0,'text':'hello'})],15,30,lambda:None)
+    assert first.value.category == second.value.category == expected
+    for exc in (first.value,second.value):
+        assert 'private-key' not in str(exc) and 'unknown-secret-reason' not in str(exc)
+
+
+def test_ai_selection_reports_structured_google_key_error_and_preserves_results(configured, monkeypatch):
+    import httpx
+    from app.services import llm_selection
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    old_job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json()
+    assert wait_job(client,old_job['id'])['status']=='completed'
+    old=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    monkeypatch.setenv('GROQ_API_KEY','private-groq'); monkeypatch.setenv('GEMINI_API_KEY','private-gemini')
+    def post(url,**kwargs):
+        if 'groq' in url: return httpx.Response(401,text='secret raw')
+        return httpx.Response(400,json={'error':{'message':'private-gemini','details':[{'reason':'API_KEY_INVALID'}]}})
+    monkeypatch.setattr(llm_selection.httpx, 'post', post)
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm'}).json()
+    failed=wait_job(client,job['id'])
+    assert failed['status']=='failed' and 'Google API_KEY_INVALID' in failed['error']
+    assert 'private' not in str(failed) and 'secret' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json()==old

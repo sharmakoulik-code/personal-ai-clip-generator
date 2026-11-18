@@ -103,6 +103,14 @@ def delete_video(video_id: str) -> bool:
         video = dict(row)
         if db.execute("SELECT 1 FROM analysis_jobs WHERE video_id=? AND status IN ('pending','running')", (video_id,)).fetchone():
             raise RuntimeError('Cancel the active analysis before deleting this video.')
+        if db.execute("SELECT 1 FROM renders WHERE video_id=? AND status IN ('pending','running')", (video_id,)).fetchone():
+            raise RuntimeError('Cancel active renders before deleting this video.')
+        for r in db.execute('SELECT path,thumbnail_path FROM renders WHERE video_id=?', (video_id,)):
+            for filename in r:
+                if filename:
+                    p = Path(filename).resolve()
+                    if not p.is_relative_to(media.storage_root() / 'rendered'): raise ValueError('Invalid render path')
+                    p.unlink(missing_ok=True)
         for key in ('path', 'thumbnail_path'):
             if video[key]:
                 path = Path(video[key]).resolve()

@@ -9,7 +9,8 @@ from . import database
 from .routes.projects import router
 from .routes.videos import router as videos_router
 from .routes.analysis import router as analysis_router
-from .services import ingestion, analysis
+from .routes.rendering import router as rendering_router
+from .services import ingestion, analysis, rendering
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,18 @@ async def lifespan(app: FastAPI):
     ingestion.start_worker()
     try:
         analysis.start_worker()
+        try:
+            rendering.start_worker()
+        except Exception:
+            analysis.stop_worker()
+            raise
     except Exception:
         ingestion.stop_worker()
         raise
     try:
         yield
     finally:
+        rendering.stop_worker()
         analysis.stop_worker()
         ingestion.stop_worker()
 
@@ -34,6 +41,7 @@ app = FastAPI(title="Personal Clip Generator API", version="0.1.0", lifespan=lif
 app.include_router(router)
 app.include_router(videos_router)
 app.include_router(analysis_router)
+app.include_router(rendering_router)
 
 
 @app.exception_handler(sqlite3.Error)

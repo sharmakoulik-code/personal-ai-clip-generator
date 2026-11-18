@@ -15,6 +15,13 @@ class AnalysisRequest(BaseModel):
     groq_titles: bool = False
     gemini_titles: bool = False
     cloud_titles: bool = False
+    selection_mode: str = 'local'
+
+    @field_validator('selection_mode')
+    @classmethod
+    def selection_supported(cls, value):
+        if value not in {'local', 'llm'}: raise ValueError('Unsupported selection mode')
+        return value
 
     @field_validator('model')
     @classmethod
@@ -45,7 +52,7 @@ def safe_job(job: dict) -> dict:
 
 @router.post('/videos/{video_id}/analyze', status_code=202)
 def analyze(video_id: str, body: AnalysisRequest):
-    if sum((body.groq_titles, body.gemini_titles, body.cloud_titles)) > 1:
+    if body.selection_mode == 'local' and sum((body.groq_titles, body.gemini_titles, body.cloud_titles)) > 1:
         raise HTTPException(422, 'Choose only one title provider.')
     video = video_or_404(video_id)
     if not video['has_audio']:
@@ -54,7 +61,7 @@ def analyze(video_id: str, body: AnalysisRequest):
         raise HTTPException(422, 'Video duration is unavailable.')
     minimum, maximum = (int(x) for x in body.duration_range.split('-'))
     try:
-        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe, body.groq_titles, body.gemini_titles, body.cloud_titles))
+        return safe_job(analysis.queue_job(video, body.model, minimum, maximum, body.force_transcribe, body.groq_titles, body.gemini_titles, body.cloud_titles, body.selection_mode))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

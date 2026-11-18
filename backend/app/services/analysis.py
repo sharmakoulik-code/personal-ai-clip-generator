@@ -11,7 +11,8 @@ import uuid
 from pathlib import Path
 
 from .. import database
-from . import clip_selection, gemini_enhancement, groq_enhancement, ingestion, media
+from . import clip_selection, gemini_enhancement, groq_enhancement, ingestion, llm_selection, media
+from .provider_errors import ProviderError, SAFE_DIAGNOSES
 
 logger = logging.getLogger(__name__)
 _stop = threading.Event()
@@ -36,7 +37,11 @@ def list_jobs(video_id: str) -> list[dict]:
         return [dict(row) for row in db.execute('SELECT * FROM analysis_jobs WHERE video_id=? ORDER BY rowid DESC LIMIT 30', (video_id,))]
 
 
-def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, groq_titles: bool = False, gemini_titles: bool = False, cloud_titles: bool = False) -> dict:
+def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, groq_titles: bool = False, gemini_titles: bool = False, cloud_titles: bool = False, selection_mode: str = 'local') -> dict:
+    if selection_mode == 'llm':
+        if not any(os.environ.get(key, '').strip() for key in ('GROQ_API_KEY', 'GEMINI_API_KEY')):
+            raise ValueError('AI clip selection requires GROQ_API_KEY or GEMINI_API_KEY in the backend environment.')
+        groq_titles = gemini_titles = cloud_titles = False
     if groq_titles and not os.environ.get('GROQ_API_KEY', '').strip():
         raise ValueError('GROQ_API_KEY is not configured in the backend environment.')
     if gemini_titles and not os.environ.get('GEMINI_API_KEY', '').strip():
@@ -46,8 +51,11 @@ def queue_job(video: dict, model: str, minimum: int, maximum: int, force: bool, 
     job_id = uuid.uuid4().hex
     try:
         with database.connect() as db:
-            db.execute('''INSERT INTO analysis_jobs (id,video_id,project_id,model,min_duration,max_duration,force_transcribe,groq_titles,gemini_titles,cloud_titles,status,stage)
-                          VALUES (?,?,?,?,?,?,?,?,?,?,'pending','Queued')''', (job_id, video['id'], video['project_id'], model, minimum, maximum, int(force), int(groq_titles), int(gemini_titles), int(cloud_titles)))
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM renders WHERE video_id=? AND status IN ('pending','running')", (video['id'],)).fetchone():
+                raise ValueError('Cancel active renders before re-analyzing this video.')
+            db.execute('''INSERT INTO analysis_jobs (id,video_id,project_id,model,min_duration,max_duration,force_transcribe,groq_titles,gemini_titles,cloud_titles,selection_mode,status,stage)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending','Queued')''', (job_id, video['id'], video['project_id'], model, minimum, maximum, int(force), int(groq_titles), int(gemini_titles), int(cloud_titles), selection_mode))
     except sqlite3.IntegrityError as exc:
         raise ValueError('An analysis is already active for this video.') from exc
     return job_detail(job_id)
@@ -230,14 +238,18 @@ def cloud_enhance(job_id: str, clips: list[dict]) -> tuple[list[dict], str]:
         update(job_id, stage=f'Cloud AI: trying {name}')
         try:
             return service.enhance(clips, lambda: check_cancel(job_id)), name
+        except ProviderError as exc:
+            # Only fixed categories are exposed: never raw responses, keys or exception text.
+            failures.append((name, SAFE_DIAGNOSES.get(exc.category, 'provider error')))
+            check_cancel(job_id)
         except ValueError:
-            # Provider helpers expose sanitized errors, but don't pass through
-            # arbitrary details, responses or keys when both providers fail.
-            failures.append(name)
+            failures.append((name, 'provider error'))
             check_cancel(job_id)
     if not failures:
         raise ValueError('Cloud AI needs GROQ_API_KEY or GEMINI_API_KEY in the backend environment.')
-    raise ValueError('Cloud AI failed with ' + ' and '.join(failures) + '. Check provider keys, model access, quota and connection; previous results were kept.')
+    names = ' and '.join(name for name, _ in failures)
+    reasons = '; '.join(f'{name}: {reason}' for name, reason in failures)
+    raise ValueError(f'Cloud AI failed with {names}. {reasons}. Previous results were kept.')
 
 
 def run_job(job: dict) -> None:
@@ -255,7 +267,10 @@ def run_job(job: dict) -> None:
         if not segments:
             raise ValueError('No speech was detected. No transcript or clips were saved.')
         update(job['id'], stage='Detecting and scoring candidate clips')
-        clips = clip_selection.generate_candidates(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']))
+        if job.get('selection_mode', 'local') == 'llm':
+            clips = llm_selection.select(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']), lambda name, i, n: update(job['id'], stage=f'Asking {name} to pick clips (window {i} of {n})'))
+        else:
+            clips = clip_selection.generate_candidates(segments, job['min_duration'], job['max_duration'], lambda: check_cancel(job['id']))
         if job['cloud_titles'] and clips:
             clips, _provider = cloud_enhance(job['id'], clips)
         if job['groq_titles'] and clips:

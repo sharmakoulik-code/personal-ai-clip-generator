@@ -1,4 +1,4 @@
-# Starts the Phase 1 application on loopback only. Run from any directory.
+# Starts the local application on loopback only. Run from any directory.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $backend = Join-Path $root 'backend'
@@ -9,7 +9,7 @@ try {
     if (-not (Get-Command py -ErrorAction SilentlyContinue)) { throw 'Python launcher (py) not found. Install Python 3.11 or newer.' }
     if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'npm not found. Install a supported Node.js version.' }
     if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-        Write-Warning 'FFmpeg and FFprobe are required for video ingestion. Install FFmpeg and reopen PowerShell.'
+        Write-Warning 'FFmpeg and FFprobe are required for video ingestion and rendering. Install FFmpeg and reopen PowerShell.'
     }
     foreach ($port in @(8000, 5173)) {
         $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
