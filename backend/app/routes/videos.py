@@ -1,5 +1,6 @@
 """Local video ingestion and persisted job endpoints."""
 import os
+import json
 from pathlib import Path, PureWindowsPath
 
 from fastapi import APIRouter, HTTPException, Request
@@ -7,7 +8,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import ClientDisconnect
 
-from ..services import ingestion, media
+from .. import database
+from ..services import ingestion, media, preflight
 
 router = APIRouter(prefix='/api')
 
@@ -49,7 +51,7 @@ def public_job(job: dict) -> dict:
 
 
 def public_video(video: dict) -> dict:
-    return {k: v for k, v in video.items() if k not in {'path', 'thumbnail_path'}} | {'has_thumbnail': bool(video['thumbnail_path'])}
+    return {k: v for k, v in video.items() if k not in {'path', 'thumbnail_path', 'preflight_json'}} | {'has_thumbnail': bool(video['thumbnail_path'])}
 
 
 def max_upload_bytes() -> int:
@@ -169,6 +171,23 @@ def cancel(job_id: str):
 def videos(project_id: int):
     check_project(project_id)
     return [public_video(v) for v in ingestion.list_videos(project_id)]
+
+
+@router.get('/videos/{video_id}/preflight')
+def video_preflight(video_id: str):
+    video = ingestion.get_video(video_id)
+    if not video: raise HTTPException(404, 'Video not found')
+    if video.get('preflight_json'):
+        try: return json.loads(video['preflight_json'])
+        except (TypeError, ValueError): pass
+    path = Path(video['path']).resolve()
+    if not path.is_relative_to(media.storage_root() / 'videos') or not path.is_file():
+        raise HTTPException(404, 'Source video not found')
+    try: result = preflight.run(path)
+    except Exception: result = preflight.failed()
+    with database.connect() as db:
+        db.execute('UPDATE videos SET preflight_json=? WHERE id=?', (json.dumps(result), video_id))
+    return result
 
 
 @router.get('/videos/{video_id}/thumbnail')

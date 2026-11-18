@@ -1,5 +1,6 @@
 """Persistent SQLite queue and a single local ingestion worker."""
 import os
+import json
 import shutil
 import threading
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from yt_dlp import YoutubeDL
 
 from .. import database
-from . import media
+from . import media, preflight
 
 ACTIVE = {'pending', 'uploading', 'downloading', 'validating', 'retrieving metadata'}
 TERMINAL = {'completed', 'failed', 'cancelled'}
@@ -111,6 +112,9 @@ def delete_video(video_id: str) -> bool:
                     p = Path(filename).resolve()
                     if not p.is_relative_to(media.storage_root() / 'rendered'): raise ValueError('Invalid render path')
                     p.unlink(missing_ok=True)
+                    if p.suffix.lower()=='.mp4':
+                        p.with_suffix('.txt').unlink(missing_ok=True)
+                        p.with_suffix('.metadata.json').unlink(missing_ok=True)
         for key in ('path', 'thumbnail_path'):
             if video[key]:
                 path = Path(video[key]).resolve()
@@ -133,15 +137,21 @@ def save_video(job: dict, temporary: Path, source_id: str | None = None) -> str:
     shutil.move(str(temporary), str(dest))
     try:
         has_thumbnail = media.make_thumbnail(dest, thumbnail)
+        try:
+            preflight_result = preflight.run(dest, lambda: check_cancel(job['id']))
+        except Cancelled:
+            raise
+        except Exception:
+            preflight_result = preflight.failed()
         check_cancel(job['id'])
         with database.connect() as db:
             current = db.execute('SELECT cancel_requested FROM jobs WHERE id=?', (job['id'],)).fetchone()
             if not current or current['cancel_requested']:
                 raise Cancelled()
-            db.execute('''INSERT INTO videos (id,project_id,source_type,source_id,title,path,thumbnail_path,duration,width,height,frame_rate,video_codec,audio_codec,has_audio,size_bytes)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            db.execute('''INSERT INTO videos (id,project_id,source_type,source_id,title,path,thumbnail_path,duration,width,height,frame_rate,video_codec,audio_codec,has_audio,size_bytes,preflight_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                        (video_id, job['project_id'], job['kind'], source_id, job['title'] or job['source'], str(dest), str(thumbnail) if has_thumbnail else None,
-                        details['duration'], details['width'], details['height'], details['frame_rate'], details['video_codec'], details['audio_codec'], int(details['has_audio']), details['size_bytes']))
+                        details['duration'], details['width'], details['height'], details['frame_rate'], details['video_codec'], details['audio_codec'], int(details['has_audio']), details['size_bytes'], json.dumps(preflight_result)))
             db.execute("UPDATE jobs SET status='completed', video_id=?, progress=100, speed=NULL, completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?", (video_id, job['id']))
     except BaseException:
         dest.unlink(missing_ok=True)

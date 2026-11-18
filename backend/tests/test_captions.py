@@ -31,3 +31,26 @@ def test_caption_empty_fails_and_times_are_clamped():
     with pytest.raises(ValueError,match='No timed'): captions.build_ass(words(),20,30,720,1280)
     entries=captions._clean([{'start':-3,'end':20,'word':'long'}],0,5)
     assert entries[0]['start']==0 and entries[0]['end']==2.5
+
+
+@pytest.mark.parametrize('style', ['highlight','classic','minimal'])
+def test_shorts_caption_safe_area_and_short_groups(style):
+    entries=[{'start':i*.3,'end':i*.3+.25,'word':s} for i,s in enumerate(['one','two','three','four','five','六七八九十','supercalifragilisticexpialidocious'])]
+    ass=captions.build_ass(entries,0,4,1080,1920,style,safe_zone=True)
+    assert r'{\an5\pos(497,1190)}' in ass
+    style_line=next(line for line in ass.splitlines() if line.startswith('Style: Default'))
+    fields=style_line.split(',')
+    assert fields[18]=='5' and int(fields[19])>=65 and int(fields[20])>=151
+    groups=captions._short_groups(captions._clean(entries,0,4))
+    assert all(len(g)<=3 for g in groups)
+    for group in groups:
+        lines=['']
+        for item in group:
+            if item['line_break']: lines.append('')
+            lines[-1]+= (' ' if lines[-1] else '')+item['text']
+        assert len(lines)<=2 and all(len(line)<=18 for line in lines)
+
+
+def test_vtt_header_and_dot_timing_preserves_commas():
+    vtt=captions.build_vtt([{'start':0.1,'end':.5,'word':'hello, friend'}],0,1)
+    assert vtt.startswith('WEBVTT\n\n') and '00:00:00.100 --> 00:00:00.500' in vtt and 'hello, friend' in vtt

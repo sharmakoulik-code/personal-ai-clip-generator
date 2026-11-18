@@ -1,7 +1,19 @@
 """Deterministic, explainable transcript-based candidate ranking (no invented text)."""
 import heapq
+import math
+import os
+import subprocess
+
+import numpy as np
 import re
 import uuid
+
+# Small, transparent ranking adjustments; not predictions of performance.
+GREETING_PENALTY = 5
+COMPLETE_ENDING_BONUS = 3
+SPEECH_ENERGY_BONUS = 3  # RMS above -44 dBFS while transcript words overlap the tail.
+SPEECH_RMS_THRESHOLD = 10 ** (-44 / 20)
+_GREETING = re.compile(r'^(?:welcome(?:\s+to)?|hey(?:\s+guys)?|hello|hi|um|uh|so\s+today)\b', re.I)
 
 _CLAUSE = re.compile(r'[,;，；][\"\'”’)]*$')
 _END = re.compile(r'[.!?。！？][\"\'”’)]*$')
@@ -62,6 +74,8 @@ def rank(text: str, begin: float, end: float, starts_clean: bool, ends_clean: bo
     ending = 90 if ends_clean else 30
     scores = {'hook_strength': hook, 'information': information, 'emotion': emotion, 'context_completeness': completeness, 'standalone': standalone, 'ending': ending}
     weighted = round(hook * .20 + information * .20 + emotion * .10 + completeness * .20 + standalone * .15 + ending * .15)
+    if _GREETING.search(text.strip()): weighted -= GREETING_PENALTY
+    if ends_clean and _END.search(text.strip()): weighted += COMPLETE_ENDING_BONUS
     reasons = []
     if has_question: reasons.append('contains a question')
     if word_set & _INTEREST: reasons.append('contains informative or curiosity-related terms')
@@ -106,3 +120,43 @@ def generate_candidates(segments: list[dict], minimum: int, maximum: int, check_
         result.append(candidate)
         if len(result) >= 30: break
     return result
+
+
+def tail_speech_energy(samples, sample_rate, words, end):
+    """Heuristic: audible energy and a timed word both occur in the last 2 s.
+
+    This cannot distinguish a voice from background music under timed speech.
+    """
+    if sample_rate<=0 or not math.isfinite(end): return False
+    overlap=False
+    for word in words:
+        try:
+            a,b=float(word['start']),float(word['end'])
+            if math.isfinite(a) and math.isfinite(b) and b>a and b>end-2 and a<end: overlap=True; break
+        except (KeyError,TypeError,ValueError): continue
+    if not overlap or len(samples)==0: return False
+    values=np.asarray(samples,dtype=np.float64)
+    if not np.all(np.isfinite(values)): return False
+    return float(np.sqrt(np.mean(values*values)))>=SPEECH_RMS_THRESHOLD
+
+
+def score_tail_audio(path, clips, words, check_cancel=lambda: None):
+    """Measure up to two seconds per selected clip; failures add no bonus."""
+    from pathlib import Path
+    from . import media
+    source=Path(path).resolve()
+    if not source.is_relative_to(media.storage_root()/'videos') or not source.is_file(): return clips
+    for clip in clips:
+        check_cancel()
+        start=max(0.,clip['end']-2.)
+        args=[os.environ.get('CLIP_FFMPEG','ffmpeg'),'-hide_banner','-loglevel','error','-nostdin','-ss',str(start),'-protocol_whitelist','file,pipe','-i',str(source),'-t',str(clip['end']-start),'-vn','-ac','1','-ar','8000','-f','f32le','pipe:1']
+        try:
+            result=subprocess.run(args,capture_output=True,timeout=30,check=True)
+            if len(result.stdout)>8000*4*3 or len(result.stdout)%4: continue
+            samples=np.frombuffer(result.stdout,dtype='<f4')
+            if tail_speech_energy(samples,8000,words,clip['end']):
+                clip['score']=min(100,clip['score']+SPEECH_ENERGY_BONUS)
+                clip['scores']['speech_energy_bonus']=SPEECH_ENERGY_BONUS
+        except (OSError,subprocess.SubprocessError,ValueError): pass
+        check_cancel()
+    return sorted(clips,key=lambda c:(-c['score'],c['start']))

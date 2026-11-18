@@ -83,3 +83,14 @@ def test_no_valid_clips_reports_failure_without_secret(monkeypatch):
     monkeypatch.setattr(llm_selection.httpx,'post',lambda *a,**k:httpx.Response(200,json=body))
     with pytest.raises(ValueError,match='AI clip selection failed') as err: llm_selection.select(units(),15,30)
     assert 'secret-key' not in str(err.value)
+
+
+def test_hook_sentence_index_is_validated_and_moves_start():
+    units=[{'start':0,'end':4,'text':'Hello there.'},{'start':4,'end':8,'text':'A strong hook.'},{'start':9,'end':20,'text':'A payoff.'}]
+    item={'start_index':0,'end_index':2,'hook_sentence_index':1,'title':'Title','reason':'Reason','scores':{k:50 for k in llm_selection.WEIGHTS}}
+    result=llm_selection.validated(item,[0,1,2],units,10,30,'Groq')
+    assert result['start']==4 and result['hook']=='A strong hook.'
+    for invalid in (2,True,-1,99,'1'):
+        item['hook_sentence_index']=invalid
+        result=llm_selection.validated(item,[0,1,2],units,10,30,'Groq')
+        assert result['start']==0

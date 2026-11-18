@@ -47,6 +47,10 @@ def initialize() -> None:
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             )
         """)
+        video_columns = {row['name'] for row in connection.execute('PRAGMA table_info(videos)')}
+        if 'preflight_json' not in video_columns:
+            connection.execute('ALTER TABLE videos ADD COLUMN preflight_json TEXT')
+
         connection.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -80,6 +84,17 @@ def initialize() -> None:
                 start REAL NOT NULL, end REAL NOT NULL, title TEXT NOT NULL, hook TEXT NOT NULL,
                 transcript TEXT NOT NULL, reason TEXT NOT NULL, score INTEGER NOT NULL,
                 scores_json TEXT NOT NULL, selected INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        clip_columns = {row['name'] for row in connection.execute('PRAGMA table_info(candidate_clips)')}
+        for name in ('original_start','original_end'):
+            if name not in clip_columns: connection.execute(f'ALTER TABLE candidate_clips ADD COLUMN {name} REAL')
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS clip_metadata (
+                clip_id TEXT PRIMARY KEY REFERENCES candidate_clips(id) ON DELETE CASCADE,
+                titles_json TEXT NOT NULL, description TEXT NOT NULL,
+                hashtags_json TEXT NOT NULL, provider TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             )
         """)
         connection.execute("""
@@ -126,6 +141,8 @@ def initialize() -> None:
         render_columns = {row['name'] for row in connection.execute('PRAGMA table_info(renders)')}
         if 'info_json' not in render_columns:
             connection.execute('ALTER TABLE renders ADD COLUMN info_json TEXT')
+        if 'caption_words_json' not in render_columns:
+            connection.execute('ALTER TABLE renders ADD COLUMN caption_words_json TEXT')
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_render_per_clip ON renders(clip_id) WHERE status IN ('pending','running')")
         connection.execute("""
             CREATE TABLE IF NOT EXISTS face_track_cache (
