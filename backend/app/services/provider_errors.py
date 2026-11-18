@@ -2,9 +2,11 @@
 
 
 class ProviderError(ValueError):
-    def __init__(self, category: str, message: str):
+    def __init__(self, category: str, message: str, *, status_code: int | None = None):
         super().__init__(message)
         self.category = category
+        # Only a valid numeric HTTP status is safe to show; never provider text.
+        self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
 
 
 SAFE_DIAGNOSES = {
@@ -18,6 +20,7 @@ SAFE_DIAGNOSES = {
     'quota': 'rate or quota limit (HTTP 429)',
     'http': 'provider returned an error',
     'invalid_response': 'invalid, truncated or blocked response',
+    'groq_json_validation': 'provider could not produce valid JSON (HTTP 400)',
 }
 
 
