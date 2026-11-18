@@ -21,6 +21,38 @@ GROQ_MAX_CLIPS=5
 MAX_RETRY_AFTER=60.0
 DEFAULT_RATE_LIMIT_WAIT=30.0
 
+# Groq GPT-OSS supports constrained structured outputs. The schema constrains
+# shape only: indices, scores and text remain untrusted and validated locally.
+GROQ_SELECTION_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'clips': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'start_index': {'type': 'integer'},
+                    'end_index': {'type': 'integer'},
+                    'hook_sentence_index': {'type': 'integer'},
+                    'title': {'type': 'string'},
+                    'hook_reason': {'type': 'string'},
+                    'reason': {'type': 'string'},
+                    'scores': {
+                        'type': 'object',
+                        'properties': {key: {'type': 'number'} for key in WEIGHTS},
+                        'required': list(WEIGHTS),
+                        'additionalProperties': False,
+                    },
+                },
+                'required': ['start_index', 'end_index', 'hook_sentence_index', 'title', 'hook_reason', 'reason', 'scores'],
+                'additionalProperties': False,
+            },
+        },
+    },
+    'required': ['clips'],
+    'additionalProperties': False,
+}
+
 
 def windows(units, max_text=MAX_TEXT):
     result=[]; i=0
@@ -90,7 +122,7 @@ def _request(provider, items, minimum, maximum, check_cancel):
         key=os.environ.get('GROQ_API_KEY','').strip(); url=groq_enhancement._URL
         headers={'Authorization':'Bearer '+key}
         prompt=prompt.replace('at most 8 clips per window', f'at most {GROQ_MAX_CLIPS} clips per window')
-        body={'model':groq_enhancement._MODEL,'temperature':.6,'max_completion_tokens':GROQ_MAX_OUTPUT_TOKENS,'reasoning_effort':'low','reasoning_format':'hidden','response_format':{'type':'json_object'},'messages':[{'role':'system','content':prompt},{'role':'user','content':content}]}
+        body={'model':groq_enhancement._MODEL,'temperature':.6,'max_completion_tokens':GROQ_MAX_OUTPUT_TOKENS,'reasoning_effort':'low','include_reasoning':False,'response_format':{'type':'json_schema','json_schema':{'name':'clip_selection','strict':True,'schema':GROQ_SELECTION_SCHEMA}},'messages':[{'role':'system','content':prompt},{'role':'user','content':content}]}
     else:
         key=os.environ.get('GEMINI_API_KEY','').strip(); url=gemini_enhancement._URL
         headers={'x-goog-api-key':key}

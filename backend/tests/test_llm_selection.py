@@ -246,7 +246,8 @@ def test_groq_json_validation_error_retries_and_recovers(monkeypatch):
     monkeypatch.setattr(llm_selection.time,'sleep',lambda seconds:waits.append(seconds))
     clips=llm_selection.select(units(),15,30)
     assert len(calls)==2 and sum(waits)==pytest.approx(1)
-    assert calls[0]['response_format']==calls[1]['response_format']=={'type':'json_object'}
+    assert calls[0]['response_format']==calls[1]['response_format']
+    assert calls[0]['response_format']['type']=='json_schema' and calls[0]['response_format']['json_schema']['strict'] is True
     assert clips[0]['title']=='A title' and 'Groq selection' in clips[0]['reason']
 
 
@@ -277,3 +278,30 @@ def test_other_groq_bad_requests_are_not_retried(monkeypatch,body):
     monkeypatch.setattr(llm_selection.httpx,'post',post)
     with pytest.raises(ValueError,match='request rejected'): llm_selection.select(units(),15,30)
     assert len(calls)==1
+
+
+def test_groq_uses_supported_strict_schema_and_local_validation(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','test-secret'); monkeypatch.delenv('GEMINI_API_KEY',raising=False)
+    seen=[]
+    def post(url,**kwargs):
+        seen.append(kwargs['json'])
+        # Shape-compliant responses still cannot supply unvalidated indices.
+        bad=candidate(999,1000); bad['hook_sentence_index']=999
+        good=candidate(0,1); good['hook_sentence_index']=0
+        return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[bad,good]})}}]})
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    clips=llm_selection.select(units(),15,30)
+    assert len(clips)==1 and clips[0]['start']==0 and clips[0]['end']==19
+    body=seen[0]
+    assert body['model']=='openai/gpt-oss-20b' and body['include_reasoning'] is False
+    assert 'reasoning_format' not in body and body['reasoning_effort']=='low'
+    fmt=body['response_format']; assert fmt['type']=='json_schema' and fmt['json_schema']['strict'] is True
+    schema=fmt['json_schema']['schema']
+    def assert_strict(node):
+        if node['type']=='object':
+            assert node['additionalProperties'] is False
+            assert set(node['required'])==set(node['properties'])
+            for value in node['properties'].values(): assert_strict(value)
+        elif node['type']=='array': assert_strict(node['items'])
+    assert_strict(schema)
+    assert set(schema['properties']['clips']['items']['properties'])=={'start_index','end_index','hook_sentence_index','title','hook_reason','reason','scores'}
