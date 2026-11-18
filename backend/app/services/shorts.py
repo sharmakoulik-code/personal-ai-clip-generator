@@ -45,14 +45,20 @@ FPS_OPTIONS = (24, 25, 30, 50, 60)
 
 
 def output_fps(rate):
-    """Choose the nearest supported rate without inventing source frames."""
+    """Select the highest standard rate, allowing a 0.5% shortfall.
+
+    The small exception normalizes rates such as 30000/1001 to 30; FFmpeg
+    may duplicate a frame occasionally to preserve the original duration.
+    Other sources are never upconverted, and output is capped at 60 fps.
+    """
     from fractions import Fraction
-    import math
-    try: source=float(Fraction(str(rate)))
-    except (ValueError, TypeError, ZeroDivisionError, OverflowError): raise ValueError('Source frame rate is unavailable.')
-    if not math.isfinite(source) or source <= 0 or source > 1000: raise ValueError('Invalid source frame rate.')
-    allowed=[r for r in FPS_OPTIONS if r <= source]
-    return max(allowed) if allowed else source
+    try: source = Fraction(str(rate))
+    except (ValueError, TypeError, ZeroDivisionError, OverflowError):
+        raise ValueError('Source frame rate is unavailable.') from None
+    if source <= 0 or source > 1000: raise ValueError('Invalid source frame rate.')
+    # Exact arithmetic keeps the inclusive 0.5% boundary deterministic.
+    allowed = [r for r in FPS_OPTIONS if source * 200 >= r * 199]
+    return max(allowed) if allowed else float(source)
 
 
 def video_encoder_args():
