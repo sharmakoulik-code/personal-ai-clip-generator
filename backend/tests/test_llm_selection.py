@@ -54,7 +54,7 @@ def test_groq_429_retries_and_falls_back_to_gemini(monkeypatch):
         return httpx.Response(200,json={'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps({'clips':[candidate()]})}]}}]})
     monkeypatch.setattr(llm_selection.httpx,'post',post); monkeypatch.setattr(llm_selection.time,'sleep',lambda t:waits.append(t))
     result=llm_selection.select(units(),15,30)
-    assert len(calls)==3 and len(waits)==5 and 'Google Gemini selection' in result[0]['reason']
+    assert len(calls)==3 and sum(waits)==pytest.approx(30) and 'Google Gemini selection' in result[0]['reason']
 
 
 def test_backoff_cancellation(monkeypatch):
@@ -94,3 +94,141 @@ def test_hook_sentence_index_is_validated_and_moves_start():
         item['hook_sentence_index']=invalid
         result=llm_selection.validated(item,[0,1,2],units,10,30,'Groq')
         assert result['start']==0
+
+
+@pytest.mark.parametrize('status',[408,500,502,503,504])
+def test_transient_http_failure_is_retried_then_succeeds(monkeypatch,status):
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.setenv('GEMINI_API_KEY','secret-gemini')
+    calls=[]; waits=[]
+    good={'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps({'clips':[candidate()]})}]}}]}
+    def post(url,**kwargs):
+        calls.append(url)
+        return httpx.Response(status,text='sensitive provider body') if len(calls)<3 else httpx.Response(200,json=good)
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda t:waits.append(t))
+    result=llm_selection.select(units(),15,30)
+    assert len(calls)==3 and len(waits)==15 and result[0]['title']=='A title'
+
+
+@pytest.mark.parametrize('error',[httpx.ConnectError('private connection details'),httpx.ReadTimeout('private timeout')])
+def test_transient_network_failure_is_retried(monkeypatch,error):
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.setenv('GEMINI_API_KEY','secret-key')
+    calls=[]
+    good={'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps({'clips':[candidate()]})}]}}]}
+    def post(*args,**kwargs):
+        calls.append(1)
+        if len(calls)<3: raise error
+        return httpx.Response(200,json=good)
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda _:None)
+    assert llm_selection.select(units(),15,30)[0]['title']=='A title'
+    assert len(calls)==3
+
+
+def test_persistent_server_error_reports_only_http_status(monkeypatch):
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.setenv('GEMINI_API_KEY','secret-key')
+    calls=[]
+    def post(*args,**kwargs):
+        calls.append(1); return httpx.Response(503,text='secret-key and untrusted provider data')
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda _:None)
+    with pytest.raises(ValueError) as err: llm_selection.select(units(),15,30)
+    assert len(calls)==3
+    assert 'Google Gemini: provider returned an error (HTTP 503)' in str(err.value)
+    assert 'secret-key' not in str(err.value) and 'untrusted provider data' not in str(err.value)
+    assert 'Previous results were kept' in str(err.value)
+
+
+def test_nontransient_auth_failure_is_not_retried(monkeypatch):
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.setenv('GEMINI_API_KEY','secret-key')
+    calls=[]
+    def post(*args,**kwargs):
+        calls.append(1); return httpx.Response(403,text='secret response')
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    with pytest.raises(ValueError,match='key rejected or model access denied'): llm_selection.select(units(),15,30)
+    assert len(calls)==1
+
+
+def test_server_error_backoff_remains_cancellable(monkeypatch):
+    monkeypatch.delenv('GROQ_API_KEY',raising=False); monkeypatch.setenv('GEMINI_API_KEY','secret-key')
+    posts=[]; checks=[]
+    def post(*args,**kwargs):
+        posts.append(1); return httpx.Response(503)
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda _:None)
+    def check():
+        checks.append(1)
+        if len(checks)==4: raise RuntimeError('cancelled')
+    with pytest.raises(RuntimeError,match='cancelled'): llm_selection.select(units(),15,30,check)
+    assert len(posts)==1
+
+
+def test_groq_smaller_windows_overlap_and_preserve_full_source_coverage():
+    source=[{'start':i*10.,'end':i*10.+9,'text':f'Sentence {i} '+('x'*550)} for i in range(25)]
+    groq=llm_selection.windows(source,llm_selection.GROQ_MAX_TEXT)
+    normal=llm_selection.windows(source)
+    assert len(groq)>len(normal)
+    assert set().union(*map(set,groq))==set(range(len(source)))
+    assert all(set(a)&set(b) for a,b in zip(groq,groq[1:]))
+    assert all(sum(min(len(source[j]['text']),1000)+50 for j in batch)<=llm_selection.GROQ_MAX_TEXT for batch in groq)
+
+
+def test_groq_and_gemini_use_different_window_budgets_on_fallback(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','fake-groq'); monkeypatch.setenv('GEMINI_API_KEY','fake-gemini')
+    source=[{'start':i*10.,'end':i*10.+9,'text':f'Sentence {i} '+('x'*550)} for i in range(20)]
+    monkeypatch.setattr(llm_selection.clip_selection,'sentences',lambda _:source)
+    calls=[]
+    def request(provider,items,minimum,maximum,check):
+        calls.append((provider,[i for i,_ in items]))
+        if provider=='Groq': raise llm_selection.ProviderError('quota','test')
+        return [candidate(items[0][0],items[1][0])]
+    monkeypatch.setattr(llm_selection,'_request',request)
+    assert llm_selection.select(source,15,30)[0]['title']=='A title'
+    assert calls[0][1]==llm_selection.windows(source,llm_selection.GROQ_MAX_TEXT)[0]
+    assert calls[1][1]==llm_selection.windows(source,llm_selection.MAX_TEXT)[0]
+    assert len(calls[0][1])<len(calls[1][1])
+
+
+def test_groq_request_uses_smaller_response_budget(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','secret-key')
+    seen=[]
+    def post(url,**kwargs):
+        seen.append(kwargs['json'])
+        return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[candidate()]})}}]})
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    llm_selection._request('Groq',[(i,u) for i,u in enumerate(units()[:2])],15,30,lambda:None)
+    assert seen[0]['max_completion_tokens']==llm_selection.GROQ_MAX_OUTPUT_TOKENS
+    assert f'at most {llm_selection.GROQ_MAX_CLIPS} clips per window' in seen[0]['messages'][0]['content']
+    assert 'Sentence 0.' in seen[0]['messages'][1]['content']
+
+
+def test_rate_limit_respects_retry_after_without_exposing_response(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','secret-key'); monkeypatch.delenv('GEMINI_API_KEY',raising=False)
+    calls=[]; waits=[]
+    def post(*args,**kwargs):
+        calls.append(1)
+        if len(calls)==1: return httpx.Response(429,headers={'Retry-After':'12.5'},text='secret provider response')
+        return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'clips':[candidate()]})}}]})
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda seconds:waits.append(seconds))
+    assert llm_selection.select(units(),15,30)[0]['title']=='A title'
+    assert len(calls)==2 and sum(waits)==pytest.approx(12.5)
+
+
+@pytest.mark.parametrize('value,expected', [(None,30),('garbage',30),('nan',30),('-1',30),('0',1),('2.5',2.5),('61',None),('inf',30)])
+def test_retry_after_is_bounded_and_handles_untrusted_values(value,expected):
+    headers={} if value is None else {'Retry-After':value}
+    assert llm_selection.retry_after_seconds(httpx.Response(429,headers=headers))==expected
+
+
+def test_too_long_retry_after_skips_retry_and_falls_back(monkeypatch):
+    monkeypatch.setenv('GROQ_API_KEY','secret-groq'); monkeypatch.setenv('GEMINI_API_KEY','secret-gemini')
+    calls=[]; waits=[]
+    def post(url,**kwargs):
+        calls.append(url)
+        if 'groq' in url: return httpx.Response(429,headers={'Retry-After':'3600'},text='private')
+        return httpx.Response(200,json={'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':json.dumps({'clips':[candidate()]})}]}}]})
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda t:waits.append(t))
+    assert 'Google Gemini selection' in llm_selection.select(units(),15,30)[0]['reason']
+    assert len(calls)==2 and waits==[]
