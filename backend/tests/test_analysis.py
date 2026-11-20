@@ -646,3 +646,28 @@ def test_ai_selection_reports_structured_google_key_error_and_preserves_results(
     assert failed['status']=='failed' and 'Google API_KEY_INVALID' in failed['error']
     assert 'private' not in str(failed) and 'secret' not in str(failed)
     assert client.get('/api/videos/vid/clips').json()==old
+
+
+def test_ai_selection_server_error_with_retranscription_preserves_existing_results(configured, monkeypatch):
+    import httpx
+    from app.services import llm_selection
+    client, _ = configured
+    monkeypatch.setattr(analysis, 'transcribe', lambda *a: ('en', fake_segments()))
+    first=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30'}).json()
+    assert wait_job(client,first['id'])['status']=='completed'
+    old_clips=client.patch('/api/videos/vid/clips/selection',json={'selected':True}).json()
+    old_transcript=client.get('/api/videos/vid/transcription').json()
+    monkeypatch.setenv('GEMINI_API_KEY','private-key'); monkeypatch.delenv('GROQ_API_KEY',raising=False)
+    monkeypatch.setattr(analysis,'transcribe',lambda *a: ('en',[dict(s,text='New '+s['text']) for s in fake_segments()]))
+    calls=[]
+    def post(*args,**kwargs):
+        calls.append(1)
+        return httpx.Response(503,text='private-key and private provider response')
+    monkeypatch.setattr(llm_selection.httpx,'post',post)
+    monkeypatch.setattr(llm_selection.time,'sleep',lambda _:None)
+    job=client.post('/api/videos/vid/analyze',json={'duration_range':'15-30','selection_mode':'llm','force_transcribe':True}).json()
+    failed=wait_job(client,job['id'])
+    assert failed['status']=='failed' and 'HTTP 503' in failed['error'] and len(calls)==3
+    assert 'private-key' not in str(failed) and 'private provider' not in str(failed)
+    assert client.get('/api/videos/vid/clips').json()==old_clips
+    assert client.get('/api/videos/vid/transcription').json()==old_transcript

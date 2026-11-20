@@ -480,7 +480,7 @@ def test_ingestion_preflight_failure_is_nonfatal(app_with_video, monkeypatch):
 def test_shorts_fps_and_output_args():
     from app.services import shorts
     assert shorts.output_fps('60/1')==60
-    assert shorts.output_fps('30000/1001')==25
+    assert shorts.output_fps('30000/1001')==30
     assert shorts.output_fps('120/1')==60
     assert shorts.output_fps('12/1')==12
     assert shorts.output_fps('24/1')==24
@@ -812,3 +812,85 @@ def test_letterbox_render_preview_captions_no_tracking(app_with_video,monkeypatc
     assert captured['layout']['y']<=p['video_rect']['y']+p['video_rect']['h']
     assert r'\pos(' in captured['text']
     assert client.get('/api/clips/clip1/preview-path',params={'layout':'letterbox','letterbox_bg':'red'}).status_code==422
+
+
+@pytest.mark.parametrize('source_rate,expected_fps', [
+    ('24000/1001', 24), ('30000/1001', 30), ('60000/1001', 60),
+])
+def test_shorts_fractional_rate_render_preserves_duration_and_audio(app_with_video, monkeypatch, source_rate, expected_fps):
+    """Exercise the real render job: probe -> output_fps -> FFmpeg -r -> MP4."""
+    import json
+    from fractions import Fraction
+    from app.services import ingestion
+    client, _, vid, tmp=app_with_video
+    path=ingestion.get_video(vid)['path']
+    ffmpeg=os.environ.get('CLIP_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CLIP_FFPROBE') or shutil.which('ffprobe')
+    subprocess.run([ffmpeg,'-hide_banner','-loglevel','error','-f','lavfi','-i',f'testsrc2=size=320x180:rate={source_rate}',
+                    '-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','2','-c:v','libx264','-preset','ultrafast',
+                    '-pix_fmt','yuv420p','-c:a','aac','-y',path],check=True)
+    # Loudness is not relevant to frame rate, but the real audio stream is retained.
+    monkeypatch.setattr(rendering,'measure_loudness',lambda *args: None)
+    response=client.post('/api/clips/clip1/render',json={'preset':'shorts','layout':'letterbox','tighten':False})
+    assert response.status_code==202,response.text
+    job=wait(client,response.json()['id']); assert job['status']=='completed',job
+    assert job['info']['fps']==expected_fps
+    output=tmp/f'fps-{expected_fps}.mp4'; output.write_bytes(client.get(f"/api/renders/{job['id']}/download").content)
+    data=json.loads(subprocess.check_output([ffprobe,'-v','error','-count_frames','-show_streams','-of','json',str(output)]))
+    video=next(s for s in data['streams'] if s['codec_type']=='video')
+    audio=next(s for s in data['streams'] if s['codec_type']=='audio')
+    assert Fraction(video['avg_frame_rate']) == expected_fps
+    assert int(video['nb_read_frames']) == round(1.5*expected_fps)
+    assert float(video['duration']) == pytest.approx(1.5, abs=1/expected_fps)
+    assert abs(float(video['duration'])-float(audio['duration'])) <= .08
+
+
+def test_fractional_rate_long_render_duplicates_only_needed_frames(tmp_path):
+    """A 1000-frame NTSC source lasts 1001/30 s; CFR 30 needs 1001 frames."""
+    import json
+    from app.services import shorts
+    ffmpeg=os.environ.get('CLIP_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CLIP_FFPROBE') or shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe: pytest.skip('FFmpeg and FFprobe required')
+    source=tmp_path/'fractional.mp4'; output=tmp_path/'normalized.mp4'
+    subprocess.run([ffmpeg,'-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc2=size=64x36:rate=30000/1001',
+                    '-frames:v','1000','-c:v','libx264','-preset','ultrafast','-pix_fmt','yuv420p','-y',str(source)],check=True)
+    graph=rendering.filter_graph({'width':64,'height':36},{'layout':'letterbox'},[],180,320)
+    fps=shorts.output_fps(media.probe_video(source)['frame_rate'])
+    subprocess.run([ffmpeg,'-hide_banner','-loglevel','error','-i',str(source),'-filter_complex',graph,'-map','[v]',
+                    '-c:v','libx264','-preset','ultrafast',*shorts.output_args(fps),'-y',str(output)],check=True)
+    data=json.loads(subprocess.check_output([ffprobe,'-v','error','-count_frames','-select_streams','v:0',
+                                            '-show_entries','stream=nb_read_frames,duration,avg_frame_rate','-of','json',str(output)]))['streams'][0]
+    assert fps==30 and data['avg_frame_rate']=='30/1'
+    assert int(data['nb_read_frames'])==1001
+    assert float(data['duration'])==pytest.approx(1001/30,abs=1/30)
+
+
+def test_shorts_fractional_rate_tightened_render_stays_in_sync(app_with_video, monkeypatch):
+    import json
+    from app.services import ingestion
+    client, _, vid, tmp=app_with_video
+    path=ingestion.get_video(vid)['path']
+    ffmpeg=os.environ.get('CLIP_FFMPEG') or shutil.which('ffmpeg')
+    ffprobe=os.environ.get('CLIP_FFPROBE') or shutil.which('ffprobe')
+    subprocess.run([ffmpeg,'-hide_banner','-loglevel','error','-f','lavfi','-i','testsrc2=size=320x180:rate=30000/1001',
+                    '-f','lavfi','-i','sine=frequency=440:sample_rate=48000','-t','6','-c:v','libx264','-preset','ultrafast',
+                    '-pix_fmt','yuv420p','-c:a','aac','-y',path],check=True)
+    with database.connect() as db:
+        db.execute('UPDATE videos SET duration=6 WHERE id=?',(vid,))
+        db.execute('UPDATE candidate_clips SET end=6 WHERE id=?',('clip1',))
+    words=[{'start':.1,'end':1.2,'word':'one'},{'start':3.,'end':5.9,'word':'two'}]
+    monkeypatch.setattr(rendering.analysis,'get_transcript',lambda _: {'segments':[{'words':words}]})
+    monkeypatch.setattr(rendering,'measure_loudness',lambda *args: None)
+    response=client.post('/api/clips/clip1/render',json={'preset':'shorts','layout':'letterbox','tighten':True})
+    assert response.status_code==202,response.text
+    job=wait(client,response.json()['id']); assert job['status']=='completed',job
+    assert job['info']['fps']==30 and job['info']['removed_seconds']>1
+    output=tmp/'edited-fps.mp4'; output.write_bytes(client.get(f"/api/renders/{job['id']}/download").content)
+    streams=json.loads(subprocess.check_output([ffprobe,'-v','error','-count_frames','-show_streams','-of','json',str(output)]))['streams']
+    video=next(s for s in streams if s['codec_type']=='video'); audio=next(s for s in streams if s['codec_type']=='audio')
+    expected_duration=job['info']['duration']
+    assert video['avg_frame_rate']=='30/1'
+    assert int(video['nb_read_frames'])==pytest.approx(expected_duration*30,abs=1)
+    assert float(video['duration'])==pytest.approx(expected_duration,abs=.05)
+    assert abs(float(video['duration'])-float(audio['duration']))<=.08

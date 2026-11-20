@@ -10,7 +10,8 @@ from .routes.projects import router
 from .routes.videos import router as videos_router
 from .routes.analysis import router as analysis_router
 from .routes.rendering import router as rendering_router
-from .services import ingestion, analysis, rendering
+from .routes.youtube_upload import router as youtube_upload_router
+from .services import ingestion, analysis, rendering, youtube_upload
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.initialize()
+    youtube_upload.initialize()
     ingestion.start_worker()
     try:
         analysis.start_worker()
@@ -42,6 +44,7 @@ app.include_router(router)
 app.include_router(videos_router)
 app.include_router(analysis_router)
 app.include_router(rendering_router)
+app.include_router(youtube_upload_router)
 
 
 @app.exception_handler(sqlite3.Error)

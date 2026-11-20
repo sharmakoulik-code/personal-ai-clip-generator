@@ -1,6 +1,7 @@
 import ReviewPanel from './ReviewPanel';
 import PreflightWarnings, {usePreflight} from './PreflightWarnings';
 import MetadataCard from './MetadataCard';
+import YouTubeUpload from './YouTubeUpload';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Clip = { id: string; start: number; end: number; title: string; selected: boolean };
@@ -24,6 +25,10 @@ export default function RenderPanel({ videoId, projectId, clips, initialClipId, 
   const noAudio=warnings.some(w=>w.code==='no_audio' && w.severity==='block');
   const [copyrightVisible,setCopyrightVisible]=useState(false);
   const [layout, setLayout] = useState<'auto' | 'follow' | 'fit_blur' | 'stack' | 'letterbox' | 'smart' | 'center' | 'blur' | 'split'>('auto');
+  function chooseLayout(next: typeof layout) {
+    setLayout(next);
+    setCaptionPosition(next === 'letterbox' ? 'on_video' : 'safe_zone');
+  }
   const [letterboxBg,setLetterboxBg]=useState('#000000');
   const [letterboxBias,setLetterboxBias]=useState(.02);
   const [letterboxEdge,setLetterboxEdge]=useState(false);
@@ -102,12 +107,27 @@ export default function RenderPanel({ videoId, projectId, clips, initialClipId, 
     {error && <div className="error" role="alert"><span>{error}</span><button onClick={() => setError('')}>Dismiss</button></div>}
     {!clips.length ? <p>Analyze the video to create clips to render.</p> : <>
       <label>Clip to preview <select className="ingest-control" value={clip?.id || ''} onChange={e => setClipId(e.target.value)}>{clips.map(c => <option key={c.id} value={c.id}>{stamp(c.start)}–{stamp(c.end)} · {c.title}</option>)}</select></label>
-      <label><input type="checkbox" checked={shortsPreset} onChange={e=>{const enabled=e.target.checked;setShortsPreset(enabled);if(enabled){setLayout('auto');setCaptionPosition('safe_zone');setCaptions(true);setTighten(true);setLoudness(-14);}}}/> YouTube Shorts preset</label>
+      <label><input type="checkbox" checked={shortsPreset} onChange={e=>{const enabled=e.target.checked;setShortsPreset(enabled);if(enabled){setCaptions(true);setTighten(true);setLoudness(-14);}}}/> YouTube Shorts preset</label>
+      <fieldset className="layout-choice">
+        <legend>Choose your video layout</legend>
+        <p>Both export a vertical 9:16 video. Choose how the original frame fits inside it.</p>
+        <div className="layout-choice-grid">
+          <button type="button" className="layout-choice-card" aria-label="9:16 crop" aria-pressed={layout === 'follow'} onClick={() => chooseLayout('follow')}>
+            <span className="layout-choice-icon layout-crop-icon" aria-hidden="true"><span /></span>
+            <span><strong>9:16 crop</strong><small>Fill the screen with a portrait crop that follows the subject. The sides may be cut off.</small></span>
+          </button>
+          <button type="button" className="layout-choice-card" aria-label="Cinematic bars" aria-pressed={layout === 'letterbox'} onClick={() => chooseLayout('letterbox')}>
+            <span className="layout-choice-icon layout-bars-icon" aria-hidden="true"><span /></span>
+            <span><strong>Cinematic bars</strong><small>Keep the entire original frame, with solid bars around it. No face-following or crop.</small></span>
+          </button>
+        </div>
+        {layout !== 'follow' && layout !== 'letterbox' && <p>Currently using an Advanced layout. Select a style above or change the Layout setting below.</p>}
+      </fieldset>
       <details open><summary>Advanced</summary><div className="render-options">
         <label>Sharpen <input type="range" min="0" max="1" step=".05" value={sharpen} onChange={e=>setSharpen(Number(e.target.value))}/></label>
         <label>Target loudness (LUFS) <input type="number" min="-30" max="-5" value={loudness} onChange={e=>setLoudness(Number(e.target.value))}/></label>
         <label><input type="checkbox" checked={tighten} onChange={e=>setTighten(e.target.checked)}/> Tighten pauses and fillers</label>
-        <label>Layout<select className="ingest-control" value={layout} onChange={e => {const next=e.target.value as typeof layout;setLayout(next);setCaptionPosition(next==='letterbox'?'on_video':'safe_zone');}}><option value="auto">Auto Shorts framing</option><option value="follow">Follow subject</option><option value="fit_blur">Full frame with blurred background</option><option value="stack">Stack two speakers</option><option value="letterbox">Cinematic bars</option><option value="smart">Smart face framing</option><option value="center">Center crop</option><option value="blur">Original with blurred background</option><option value="split">Split-screen (same source)</option></select></label>
+        <label>Layout<select className="ingest-control" value={layout} onChange={e => chooseLayout(e.target.value as typeof layout)}><option value="auto">Auto Shorts framing</option><option value="follow">Follow subject</option><option value="fit_blur">Full frame with blurred background</option><option value="stack">Stack two speakers</option><option value="letterbox">Cinematic bars</option><option value="smart">Smart face framing</option><option value="center">Center crop</option><option value="blur">Original with blurred background</option><option value="split">Split-screen (same source)</option></select></label>
         {layout === 'letterbox' && <>
           <span className="letterbox-schematic" role="img" aria-label="Cinematic bars schematic"><span /></span>
           <label>Background colour <input type="text" value={letterboxBg} onChange={e=>setLetterboxBg(e.target.value)} aria-invalid={!validLetterboxColor} placeholder="#000000" /></label>
@@ -119,7 +139,7 @@ export default function RenderPanel({ videoId, projectId, clips, initialClipId, 
         </>}
         <label>Resolution<select className="ingest-control" value={resolution} onChange={e => setResolution(Number(e.target.value))}><option value={1920}>1080 × 1920</option><option value={1280}>720 × 1280</option></select></label>
         <label>Quality<select className="ingest-control" value={quality} onChange={e => setQuality(e.target.value)}><option value="high">High</option><option value="balanced">Balanced</option><option value="small">Smaller file</option></select></label>
-        {(layout === 'smart' || layout === 'center' || layout === 'follow' || layout === 'auto') && <><label>Horizontal framing <input type="range" min="-1" max="1" step="0.05" value={horizontal} onChange={e => setHorizontal(Number(e.target.value))} /></label><label>Vertical framing <input type="range" min="-1" max="1" step="0.05" value={vertical} onChange={e => setVertical(Number(e.target.value))} /></label><label>Zoom <input type="range" min="1" max="2" step="0.05" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label><button className="secondary-btn" onClick={() => {setHorizontal(0); setVertical(0); setZoom(1); setLayout('smart'); setCaptionPosition('safe_zone'); setTrack(true);}}>Reset to automatic tracking</button></>}
+        {(layout === 'smart' || layout === 'center' || layout === 'follow' || layout === 'auto') && <><label>Horizontal framing <input type="range" min="-1" max="1" step="0.05" value={horizontal} onChange={e => setHorizontal(Number(e.target.value))} /></label><label>Vertical framing <input type="range" min="-1" max="1" step="0.05" value={vertical} onChange={e => setVertical(Number(e.target.value))} /></label><label>Zoom <input type="range" min="1" max="2" step="0.05" value={zoom} onChange={e => setZoom(Number(e.target.value))} /></label><button className="secondary-btn" onClick={() => {setHorizontal(0); setVertical(0); setZoom(1); chooseLayout('smart'); setTrack(true);}}>Reset to automatic tracking</button></>}
         {layout === 'smart' && <><label><input type="checkbox" checked={track} onChange={e => setTrack(e.target.checked)} /> Track faces</label><label>Detection interval (seconds) <input className="ingest-control" type="number" min="0.5" max="5" step="0.5" value={interval} onChange={e => setIntervalValue(Number(e.target.value))} /></label></>}
         {(layout === 'smart' || layout === 'auto') && <><label>Tracking engine <select className="ingest-control" value={engine} onChange={e => setEngine(e.target.value as typeof engine)}><option value="standard">Standard face framing</option><option value="subject">Subject tracking</option></select></label>{engine === 'subject' && <><label>Camera smoothness <input type="range" min="0.15" max="2" step="0.05" value={smoothTime} onChange={e => setSmoothTime(Number(e.target.value))} /></label><label><input type="checkbox" checked={speaker} onChange={e => setSpeaker(e.target.checked)} /> Follow active speaker (heuristic)</label></>}</>}
         {layout === 'auto' && <label><input type="checkbox" checked={stackTwo} onChange={e => setStackTwo(e.target.checked)} /> Stack two speakers when possible</label>}
@@ -133,6 +153,7 @@ export default function RenderPanel({ videoId, projectId, clips, initialClipId, 
       <div className="analysis-actions"><button className="primary-btn" disabled={busy || (layout==='letterbox' && !validLetterboxColor)} onClick={() => void start(false)}>Render selected clip</button><button className="secondary-btn" disabled={busy || !selected.length || (layout==='letterbox' && !validLetterboxColor)} onClick={() => void start(true)}>Render all selected clips in project</button></div>
     </>}
     {batchRows.length > 0 && <div className="job-progress"><strong>Latest batch: {batchRows.filter(r => r.status === 'completed').length}/{batchRows.length} completed</strong><progress max="100" value={batchProgress} /><span>{batchProgress}%</span></div>}
+    <YouTubeUpload projectId={projectId} renders={thisVideo} />
     {thisVideo.map(r => <article className="clip-card" key={r.id}><strong>{r.clip_title}</strong>{r.video_id !== videoId && <p>From another video in this project</p>}<p>{r.stage} · {r.status}{r.error ? ` · ${r.error}` : ''}</p>{r.progress != null && <div className="job-progress"><progress max="100" value={r.progress} /><span>{Math.round(r.progress)}%</span></div>}{r.tracking_status && <p>Framing: {r.tracking_status.replace(/_/g, ' ')}</p>}{r.info?.speaker_status === 'no_transcript' && <p>No timed speech in this clip; used visual tracking instead.</p>}{r.info?.speaker_status === 'heuristic' && <p>Speaker heuristic: {r.info.tracks} tracks, {r.info.speaker_switches} switches. Review the result.</p>}{r.status === 'completed' && <>{r.info?.layout_used && <p>Layout used: {r.info.layout_used} · Removed: {r.info.removed_seconds ?? 0}s</p>}{r.info?.loudness && <p>Loudness: {r.info.loudness.before ?? 'unknown'} → {r.info.loudness.after ?? 'unknown'} LUFS</p>}<p>Checklist: {r.width===1080 && r.height===1920?'✓':'Check'} vertical 1080×1920 · {(r.info?.duration ?? 999)<=180?'✓':'Check'} within 180 seconds · {r.info?.loudness?.after != null && Math.abs(r.info.loudness.after-(r.settings?.loudness_lufs ?? -14))<=1.5?'✓':'Check'} audio normalized · {r.settings?.captions && r.settings.caption_safe_zone?'Review':'Not enabled'} caption safe zone</p><video controls preload="metadata" src={`/api/renders/${r.id}/stream`} /><a className="secondary-btn" href={`/api/renders/${r.id}/download`} onClick={notice}>Download MP4</a>{r.clip_id && <a className="secondary-btn" href={`/api/clips/${r.clip_id}/captions.srt${r.settings ? `?render_id=${encodeURIComponent(r.id)}` : ''}`} onClick={notice}>Download SRT</a>}{r.clip_id && <a className="secondary-btn" href={`/api/clips/${r.clip_id}/captions.vtt${r.settings ? `?render_id=${encodeURIComponent(r.id)}` : ''}`} onClick={notice}>Download VTT</a>}{r.clip_id && <MetadataCard clipId={r.clip_id}/>}</>}{active(r) && <button className="secondary-btn" disabled={busy} onClick={() => void action(`/api/renders/${r.id}/cancel`, 'POST')}>Cancel render</button>}{(r.status === 'failed' || r.status === 'cancelled') && <button className="secondary-btn" disabled={busy} onClick={() => void action(`/api/renders/${r.id}/retry`, 'POST')}>Retry render</button>}{!active(r) && <button className="delete-btn" disabled={busy} onClick={() => { if (window.confirm('Delete this render?')) void action(`/api/renders/${r.id}`, 'DELETE'); }}>Delete render</button>}</article>)}
   </section>;
 }

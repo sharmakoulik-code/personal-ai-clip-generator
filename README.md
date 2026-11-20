@@ -131,7 +131,7 @@ API subject tracking can optionally use a mouth-motion active-speaker heuristic 
 
 Optional burned-in captions use stored word timestamps and local FFmpeg/libass. The render API supports `captions`, `caption_style` (`highlight`, `classic`, `minimal`) and `caption_uppercase`; `/api/clips/{id}/captions.srt` exports a plain SRT. Missing timed words fail explicitly. Set `CLIP_CAPTION_FONT` (default Arial; try Montserrat or Impact) and optionally `CLIP_CAPTION_FONTS_DIR` before startup. Font files are copied temporarily for FFmpeg; an FFmpeg build with the `ass` filter is required. Use the render panel to enable captions and choose a style. Check timing, legibility and platform-safe placement yourself.
 
-The analysis API also offers opt-in `selection_mode: "llm"`: numbered sentence transcript excerpts and timings (not video) are sent to Groq, with Gemini fallback. The LLM suggests sentence indices, titles, explanations and scores; the app validates indices and derives timestamps locally, enforces duration and overlap limits, and blends AI and local scores. Provider failures or no valid selections leave prior results unchanged. AI-picked mode supersedes the title-provider flags. Its choices can still be inaccurate or lack context; review every clip and provider privacy terms. Choose AI-picked in the analysis form to opt in.
+The analysis API also offers opt-in `selection_mode: "llm"`: numbered sentence transcript excerpts and timings (not video) are sent to Groq, with Gemini fallback. The LLM suggests sentence indices, titles, explanations and scores; the app validates indices and derives timestamps locally, enforces duration and overlap limits, and blends AI and local scores. Provider failures or no valid selections leave prior results unchanged. AI-picked mode supersedes the title-provider flags. Groq uses smaller overlapping windows to reduce rate-limit pressure, with a bounded, cancellable wait on rate limits; this can change the context the model sees and may take longer. Its choices can still be inaccurate or lack context; review every clip and provider privacy terms. Choose AI-picked in the analysis form to opt in.
 
 ### Experimental Shorts framing API
 
@@ -150,4 +150,31 @@ These settings reflect YouTube guidance as of late 2026; **verify current YouTub
 
 ### Cinematic bars
 
-Choose **Cinematic bars** to fit the entire source inside a solid portrait canvas without face tracking, cropping or blur. The background colour accepts six-digit hex; vertical position and a soft edge are optional. Captions default to on-video, constrained by the safe zone when possible; if there is insufficient room they fall back to the safe-zone placement. The preview shows the video rectangle and bars. An exact 9:16 source fills the canvas; sources narrower than 9:16 keep their full image with side bars rather than being cropped or stretched. Check the finished video and captions manually.
+In the render panel, choose **9:16 crop** to fill the portrait frame (the sides of a widescreen source may be cropped), or **Cinematic bars** to fit the entire source inside a solid portrait canvas without face tracking, cropping or blur. The background colour accepts six-digit hex; vertical position and a soft edge are optional. Captions default to on-video, constrained by the safe zone when possible; if there is insufficient room they fall back to the safe-zone placement. The preview shows the video rectangle and bars. An exact 9:16 source fills the canvas; sources narrower than 9:16 keep their full image with side bars rather than being cropped or stretched. The existing Auto and other layouts remain available under Advanced; Auto remains the initial setting until you choose a layout. Check the finished video and captions manually.
+
+## Schedule completed renders on YouTube (optional)
+
+This optional feature sends **only the completed renders you select**, their reviewed title, description, audience setting and publication time to YouTube after confirmation. It does not send source videos or transcripts for this feature. Select several renders in a project and choose an individual local date and time for each. Videos are uploaded as private and requested to become public at the selected time. Keep the app and computer on until all uploads finish; after YouTube accepts the schedule it handles publication. Check processing, the channel and the schedule in YouTube Studio. This feature is experimental: automated tests mock Google; a real sign-in/upload has not yet been verified.
+
+### One-time Google setup
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **YouTube Data API v3** under APIs & Services. Review any billing prompts before accepting; do not enable paid services unnecessarily.
+2. Configure the **Google Auth Platform** audience. For an external app in Testing, add your Google account as a test user. Google may show an unverified-app warning. See [Google's audience guidance](https://support.google.com/cloud/answer/15549945).
+3. Create an **OAuth client ID** for a **Desktop app** under Clients/Credentials. Download its JSON file and keep it private. Do not commit it or send it in chat. This is separate from your Gemini API key.
+4. Stop the app and use the same Windows PowerShell window that you will use to start it. Import the downloaded JSON **locally** (enter its full file path when prompted):
+
+   ```powershell
+   cd "C:\Users\ronni\OneDrive\Desktop\personal-ai-clip-generator-phase1"
+   $file = Read-Host 'Full path to your downloaded Desktop OAuth JSON file'
+   $google = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+   $env:YOUTUBE_CLIENT_ID = [string]$google.installed.client_id
+   $env:YOUTUBE_CLIENT_SECRET = [string]$google.installed.client_secret
+   Remove-Variable google, file
+   powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+   ```
+
+   You can also set Groq/Gemini keys in this window if needed. The OAuth variables last only for this PowerShell session; repeat step 4 after restarting Windows. Delete or safely store the downloaded JSON as you prefer.
+5. Open `http://127.0.0.1:5173`, open a project with completed renders, and find **Schedule rendered videos on YouTube**. Click **Connect YouTube**, choose the intended Google/YouTube account and grant upload access. Return to the app; allow pop-ups and the local browser callback if asked. You must sign in again after the backend restarts or its short-lived access token expires. **Disconnect** clears the local in-memory token; to revoke the Google grant, use your Google account's third-party access settings.
+6. Select completed renders, review/edit each title and description, select whether each is made for kids, and select a future local publication time. Click **Upload and schedule selected** and confirm. Existing generated metadata, if present, is offered for editing. Uploads run one at a time. No uploads happen without your confirmation.
+
+If a connection drops after an upload begins, the outcome can be unknown. **Check YouTube Studio before retrying**, to avoid duplicates. The app stores a local upload record and requires a second warning confirmation for previously uploaded/uncertain renders. Google account restrictions, API quota, processing, copyright and scheduling rules still apply; an accepted upload is not a guarantee that it will publish. Uploaded videos and their metadata are sent to Google/YouTube and subject to their policies. Review [YouTube's Terms](https://www.youtube.com/t/terms) and [Google's Privacy Policy](https://policies.google.com/privacy). See `backend/README.md` for technical details.
