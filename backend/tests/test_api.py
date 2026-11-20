@@ -36,3 +36,21 @@ def test_database_error_returns_safe_503(tmp_path, monkeypatch):
         response = client.get("/api/health")
         assert response.status_code == 503
         assert response.json() == {"detail": "Local database unavailable"}
+
+
+def test_removed_youtube_publishing_keeps_import_and_local_data(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / 'test.sqlite3'
+    monkeypatch.setenv('CLIP_DB_PATH', str(path))
+    # A database from the previous version may have upload history: leave it untouched.
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE youtube_uploads (render_id TEXT, status TEXT)')
+        db.execute("INSERT INTO youtube_uploads VALUES ('old-render', 'uploaded')")
+    with TestClient(app) as client:
+        assert client.get('/api/youtube/status').status_code == 404
+        assert client.post('/api/youtube/connect').status_code == 404
+        assert client.post('/api/youtube/upload', json={}).status_code == 404
+        # Import is a separate feature and its endpoint remains registered.
+        assert client.post('/api/videos/youtube/metadata', json={}).status_code == 422
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT * FROM youtube_uploads').fetchall() == [('old-render', 'uploaded')]

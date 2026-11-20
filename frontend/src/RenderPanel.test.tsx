@@ -176,3 +176,53 @@ it('configures cinematic bars and validates colour before submitting',async()=>{
   const call=fetcher.mock.calls.find(c=>String(c[0])==='/api/clips/c1/render') as unknown as [unknown,RequestInit];
   expect(JSON.parse(String(call[1].body))).toMatchObject({layout:'letterbox',letterbox_bg:'#1a2B3c',letterbox_vertical_bias:.1,letterbox_edge:true,caption_position:'on_video'});
 });
+
+it('offers 9:16 crop and cinematic bars, and sends the chosen layout to previews and renders', async()=>{
+  const fetcher=vi.fn(async(path:RequestInfo|URL)=>response(String(path).startsWith('/api/renders?')?[]:{id:'new'},202));
+  vi.stubGlobal('fetch',fetcher);
+  const user=userEvent.setup();
+  render(<RenderPanel shortsMode videoId="v1" projectId={1} clips={clips}/>);
+  const crop=screen.getByRole('button',{name:'9:16 crop'});
+  const bars=screen.getByRole('button',{name:'Cinematic bars'});
+  expect(screen.getByText(/Currently using an Advanced layout/)).toBeTruthy();
+  await user.click(crop);
+  expect(crop.getAttribute('aria-pressed')).toBe('true');
+  expect(bars.getAttribute('aria-pressed')).toBe('false');
+  expect((screen.getByLabelText('Layout') as HTMLSelectElement).value).toBe('follow');
+  await waitFor(()=>expect(screen.getByAltText('Representative crop preview').getAttribute('src')).toContain('layout=follow'));
+  await user.click(screen.getByRole('button',{name:'Render selected clip'}));
+  let call=fetcher.mock.calls.find(c=>String(c[0])==='/api/clips/c1/render') as unknown as [unknown,RequestInit];
+  expect(JSON.parse(String(call[1].body))).toMatchObject({layout:'follow',caption_position:'safe_zone'});
+  await user.click(bars);
+  expect(bars.getAttribute('aria-pressed')).toBe('true');
+  expect(crop.getAttribute('aria-pressed')).toBe('false');
+  expect((screen.getByLabelText('Caption position') as HTMLSelectElement).value).toBe('on_video');
+  await waitFor(()=>expect(screen.getByAltText('Representative crop preview').getAttribute('src')).toContain('layout=letterbox'));
+  await waitFor(()=>expect(fetcher.mock.calls.some(c=>String(c[0]).includes('/preview-path?') && String(c[0]).includes('layout=letterbox'))).toBe(true));
+  await user.click(screen.getByRole('button',{name:'Render all selected clips in project'}));
+  call=fetcher.mock.calls.find(c=>String(c[0])==='/api/projects/1/render-batch') as unknown as [unknown,RequestInit];
+  expect(JSON.parse(String(call[1].body))).toMatchObject({layout:'letterbox',caption_position:'on_video'});
+  await user.click(screen.getByLabelText('YouTube Shorts preset'));
+  await user.click(screen.getByLabelText('YouTube Shorts preset'));
+  expect(bars.getAttribute('aria-pressed')).toBe('true');
+  await user.click(crop);
+  await user.click(screen.getByRole('button',{name:'Render all selected clips in project'}));
+  const calls=fetcher.mock.calls.filter(c=>String(c[0])==='/api/projects/1/render-batch');
+  const switched=calls[calls.length-1] as unknown as [unknown,RequestInit];
+  expect(JSON.parse(String(switched[1].body))).toMatchObject({layout:'follow',caption_position:'safe_zone'});
+  await user.selectOptions(screen.getByLabelText('Layout'),'fit_blur');
+  expect(crop.getAttribute('aria-pressed')).toBe('false');
+  expect(bars.getAttribute('aria-pressed')).toBe('false');
+  expect(screen.getByText(/Currently using an Advanced layout/)).toBeTruthy();
+});
+
+it('keeps render downloads without showing YouTube publishing controls', async () => {
+  const rows=[{id:'r1',clip_id:'c1',batch_id:'b1',project_id:1,video_id:'v1',clip_title:'First',status:'completed',stage:'done',progress:100,error:null,tracking_status:null,width:1080,height:1920}];
+  const fetcher=vi.fn(async (path:RequestInfo|URL)=>response(String(path).startsWith('/api/renders?') ? rows : {}));
+  vi.stubGlobal('fetch',fetcher);
+  render(<RenderPanel videoId="v1" projectId={1} clips={clips} />);
+  expect(await screen.findByRole('link',{name:'Download MP4'})).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'Connect YouTube'})).toBeNull();
+  expect(screen.queryByText('Schedule rendered videos on YouTube')).toBeNull();
+  expect(fetcher.mock.calls.some(call=>String(call[0]).startsWith('/api/youtube/'))).toBe(false);
+});
