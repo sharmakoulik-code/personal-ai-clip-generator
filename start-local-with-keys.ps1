@@ -44,28 +44,41 @@ function Read-KeyFromClipboard {
         [Parameter(Mandatory)][string]$Name,
         [string]$Prefix = ''
     )
-    $prompt = "Copy your $Name API key to the clipboard, then press Enter. Type nothing here. " +
-              "Leave the clipboard empty and press Enter to skip."
-    $null = Read-Host $prompt
-    $value = ''
-    try { $value = (Get-Clipboard -Raw) } catch { $value = '' }
-    # Overwrite the key as soon as it has been read, in case the prompt is retried.
-    try { Set-Clipboard -Value ' ' } catch { }
-    if ($null -ne $value) { $value = $value.Trim() }
+    # Two attempts: clipboard reads happen fast, so a copy that lands a moment
+    # late (or a clipboard that a manager cleared) would otherwise look "empty".
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if ($attempt -eq 1) {
+            Write-Host ("1. Copy your {0} API key to the clipboard (Ctrl+C)." -f $Name) -ForegroundColor White
+            Write-Host '2. Wait until you see it copied, then press Enter here. Do not paste it into this window.' -ForegroundColor DarkGray
+            $null = Read-Host "Press Enter when the $Name key is on the clipboard (Enter on an empty clipboard skips it)"
+        } else {
+            Write-Host "  The clipboard was empty. Nothing was read, so nothing was skipped by mistake yet." -ForegroundColor Yellow
+            Write-Host ("  Copy the {0} key again, then press Enter to retry. Press Enter twice to skip." -f $Name) -ForegroundColor Yellow
+            $null = Read-Host "Press Enter to retry reading the $Name key"
+            Start-Sleep -Milliseconds 150
+        }
 
-    if (-not $value) {
-        Write-Host "  $Name : skipped (clipboard was empty)." -ForegroundColor DarkGray
-        return $null
-    }
-    if ($value -match '\s') {
-        throw "$Name key contains whitespace. Copy only the key itself: no quotes and no line breaks."
-    }
-    if ($Prefix -and -not $value.StartsWith($Prefix)) {
-        Write-Warning "$Name : loaded $($value.Length) characters, but keys normally start with '$Prefix'. Double-check you copied the right value."
+        $raw = ''
+        try { $raw = Get-Clipboard -Raw } catch { $raw = '' }
+        $value = ''
+        if ($raw) { $value = ($raw -replace '\s', '') }
+
+        if (-not $value) { continue }
+
+        # Wipe the clipboard only after a successful read.
+        try { Set-Clipboard -Value ' ' } catch { }
+
+        if ($Prefix -and -not $value.StartsWith($Prefix)) {
+            Write-Warning ("{0} : read {1} characters, but this does not look like a {0} key (expected it to start with '{2}')." -f $Name, $value.Length, $Prefix)
+            Write-Warning 'Check that you copied the right provider key. Keeping it anyway; re-run the script to replace it.'
+        } else {
+            Write-Host ("  {0} : loaded {1} characters." -f $Name, $value.Length) -ForegroundColor Green
+        }
         return $value
     }
-    Write-Host ("  {0} : loaded {1} characters." -f $Name, $value.Length) -ForegroundColor Green
-    return $value
+
+    Write-Host ("  {0} : skipped (clipboard still empty)." -f $Name) -ForegroundColor DarkGray
+    return $null
 }
 
 Write-Host 'Personal AI Clip Generator - start with cloud AI keys' -ForegroundColor Cyan
@@ -99,6 +112,15 @@ if (-not $groq -and -not $gemini) {
 
 $env:GROQ_API_KEY = $groq
 $env:GEMINI_API_KEY = $gemini
+
+$groqState = if ($groq) { 'loaded' } else { 'not set' }
+$geminiState = if ($gemini) { 'loaded' } else { 'not set' }
+Write-Host ''
+Write-Host ("Summary: Groq = {0} | Gemini = {1}" -f $groqState, $geminiState) -ForegroundColor Cyan
+if (-not $gemini) {
+    Write-Host 'Cloud AI will use Groq only; there is no fallback provider.' -ForegroundColor DarkGray
+}
+Write-Host ''
 
 if ($Persist) {
     foreach ($pair in @(@('GROQ_API_KEY', $groq), @('GEMINI_API_KEY', $gemini))) {
