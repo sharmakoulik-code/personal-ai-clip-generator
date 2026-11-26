@@ -96,7 +96,13 @@ $null = Read-Host 'Copy your Gemini key, then press Enter without pasting'; $env
 powershell -ExecutionPolicy Bypass -File .\start-local.ps1
 ```
 
-The backend inherits these variables; the app does not store the keys. The commands overwrite the current clipboard with a space; clipboard history may still retain the keys if enabled. Closing the PowerShell windows clears the variables from those processes. Never paste keys into chat, screenshots, commands or Git.
+Alternatively, `start-local-with-keys.ps1` does the clipboard prompts and the restart in one step: it asks you to copy the Groq key (and then the Gemini key) to the clipboard, reads it on Enter, overwrites the clipboard, stops any old backend/frontend on ports 8000 and 5173, and starts both servers with the keys in their environment.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-local-with-keys.ps1
+```
+
+Use `-GroqOnly` to skip the Gemini prompt, `-NoRestart` to load the keys without starting anything, and `-Persist` to also save them in your Windows user environment (registry; visible to new terminals). Without `-Persist` the keys exist only in memory for the two server windows. The backend inherits these variables; the app does not store the keys. The commands overwrite the current clipboard with a space; clipboard history may still retain the keys if enabled. Closing the PowerShell windows clears the variables from those processes. Never paste keys into chat, screenshots, commands or Git.
 
 
 ## Phase 4: vertical clip rendering (Windows validation pending)
